@@ -7,6 +7,7 @@ import pdb
 import math
 import pickle
 import cv2
+from nnlib.tools.pytorch_batchsize import * 
 
 '''
 params["paths"]["root_path"]
@@ -373,9 +374,16 @@ class NN_UNET_HEATMAP:
                         aspp=False, attention=False, bn_relu_at_first=False, bn_relu_at_end=True)
         else:
             raise("Net type ´"+ self.__type+"´ is not implemented!")
-                
-           
+                                       
         self.learner =  Learner(self.__bunch, net, path=self.__root_path, callback_fns=callback_fns)          
+                
+        if self.__bs == -1:            
+            max_batch_estimator = MAX_BATCH_SIZE_ESTIMATER(net=net, opt=self.learner.opt_func.func,
+                                                           loss_func=self.learner.loss_func, gpu_id=self.__gpu_id, 
+                                                           input_features=self.__unet_in_channels, input_size_x=self.__size[1],
+                                                           input_size_y=self.__size[0])
+            self.learner.data.batch_size = max_batch_estimator.find_max_bs()
+                
     
     
     def __create_databunch(self):        
@@ -392,9 +400,11 @@ class NN_UNET_HEATMAP:
                                         convert_mode=self.__image_convert_mode, preload=self.__preload)        
         
         data = data.split_by_valid_func(self.__valid_set_splitter)        
-        data = data.label_from_func(func=self.__get_y_data, label_cls=None, show_func = self.__show_func, preload=self.__preload, gpu_id=self.__gpu_id)
-        data = data.transform(self.__transforms, size=self.__size, tfm_y=True) 
-        self.__bunch = data.databunch(bs=self.__bs).normalize(self.__norm_stats, do_y=False)        
+        data = data.label_from_func(func=self.__get_y_data, label_cls=None, show_func = self.__show_func, 
+                                    preload=self.__preload, gpu_id=self.__gpu_id)
+        data = data.transform(self.__transforms, size=self.__size, tfm_y=True)
+        bs = 1 if self.__bs == -1 else self.__bs        
+        self.__bunch = data.databunch(bs=bs).normalize(self.__norm_stats, do_y=False)        
         
         
 class heatmap_metric(LearnerCallback):
