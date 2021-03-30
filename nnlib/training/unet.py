@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import pdb
 
+__all__ = ["UNet"]
+
 res34_downsample = [3,4,6,3]
 
 downsample_none = 0
@@ -207,7 +209,7 @@ class UNet(nn.Module):
         features = init_features        
         self.squeeze_excite = squeeze_excite
         
-        # DECODER
+        # ENCODER
         self.encoder1 = _layerBlocks(in_channels,features,downsample_none,block_sizes_down[0],squeeze_excite, 
                                      resblock, False, bn_relu_at_end)
         
@@ -226,7 +228,7 @@ class UNet(nn.Module):
         else:
             self.bottleneck = _layerBlocks(features*8,features*16,downsample_method,blocksize_bottleneck,False,resblock)                
         
-        # ENCODER
+        # DECODER
         if attention:
             self.attn1 = AttentionBlock(features*8, features*16, features * 16)
             
