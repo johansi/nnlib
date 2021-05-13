@@ -63,8 +63,12 @@ def heatmap_to_circle(mask, cp=None):
     radius = mask.shape[0]
     #if not is_valid_radius(radius,cp,mask.shape):
         #return None
-    if cp is None:    
-        cp = np.flip(np.mean(np.array(np.where(mask>0.5)).T, axis=0).astype(np.int))
+    if cp is None:
+        thresholded_mask = mask>0.5
+        if len(np.unique(thresholded_mask)) == 1:
+            return None
+        
+        cp = np.flip(np.mean(np.array(np.where(thresholded_mask>0.5)).T, axis=0).astype(np.int))
         
     scan_points = get_scan_points(10,cp[0],cp[1],mask.shape[0],radius)
     circle_points = get_circle_points(scan_points,cp[0],cp[1],mask)
