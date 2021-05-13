@@ -7,7 +7,10 @@ from scipy.interpolate import splprep, splev
 
 def heatmap_to_multiple_points(pred, thres=0.5, max_points=100):    
     mask = (pred > thres).astype(np.uint8)
-    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if int(cv2.__version__[0]) < 4:
+        _, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    else:
+        contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if (len(contours) == 0) or (len(contours) > max_points):
         return None
     nut_points = np.zeros((len(contours),2))
