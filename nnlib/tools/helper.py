@@ -1,5 +1,9 @@
 import numpy as np
+import os
+import platform
 
+
+__all__ = ["print_types","printing","get_label","get_labels","replace_values","num_workers","power_of_2"]
 
 class print_types:
     HEADER = ('\033[95m', "HEADER")
@@ -57,3 +61,26 @@ def replace_values(labels, replacements):
                 if label["value"] == replace[0]:
                     label["value"] = replace[1]
                     break
+
+def num_workers():
+    "Get number of workers"
+    
+    if  platform.system() == "Windows":
+        return 0
+    
+    try:                   
+        return len(os.sched_getaffinity(0))
+    except AttributeError: 
+        return os.cpu_count()                    
+    
+def power_of_2(n):
+    if type(n) == int:
+        n = [n]    
+    if (type(n) == tuple) or (type(n) == list):
+        for i in n:
+            if not ((i & (i-1) == 0) and i != 0):
+                return False
+    else:
+        return False
+    
+    return True
