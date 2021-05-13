@@ -12,9 +12,20 @@ def square_image(image):
     crop = int(abs(image.shape[1] - image.shape[0])/2)
     return image[:,crop:-crop,...]
 
-def load_image(img_file, convert_mode="RGB"):
-    img = Image.open(img_file).convert(convert_mode)
-    return np.asarray(img)
+def load_image(img_file, convert_mode="RGB", size=(512,512), to_numpy=True, after_open=None):
+    "Load PIL.Image from `fn` with `size(height, width)`"
+    img = Image.open(img_file).resize((size[1],size[0])).convert(convert_mode)    
+    if  to_numpy:
+        img = np.asarray(img)
+        
+    if after_open is not None:
+        img = after_open(img)
+        
+    return img
+
+def load_heatmap(fn, size=(512,512)):
+    "Load mask in PIL.Image from `fn` with `size(height, width)`"
+    return load_image(fn, size=size, convert_mode="L", to_numpy=False)
 
 def batch_and_normalize(img, mean, std):
     data = ((img/255)-mean) / std
