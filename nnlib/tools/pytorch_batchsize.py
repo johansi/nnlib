@@ -1,77 +1,45 @@
 import torch
+import pdb
+from .gpu_memory_tools import *
+import numpy as np
 
-class MAX_BATCH_SIZE_ESTIMATER:
+class Batch_Size_Estimator:
     
-    def __init__(self, net, opt, loss_func, gpu_id=0, input_features=1, input_size_x=256, input_size_y=256):
-        self.__gpu_id = gpu_id
+    def __init__(self, net, opt, loss_func, dataset, gpu_id=0):
+        self.__gpu_info = GPU_MEM_INFO(gpu_id)
+        self.__device = torch.device("cuda:"+str(gpu_id))
         self.__net = net
-        #self.__opt = opt
         self.__loss_func = loss_func
-        self.__input_features = input_features
-        self.__input_size_x = input_size_x
-        self.__input_size_y = input_size_y        
-        
-    def check_bs(self,bs):        
-        input_data = None
-        out = None
-        label_data = None
-        loss = None
-        try:
-            input_data = torch.cuda.FloatTensor(bs,self.__input_features,self.__input_size_y,self.__input_size_x, 
-                                            device="cuda:"+str(self.__gpu_id))
-            out = self.__net(input_data)                
-            label_data = torch.cuda.FloatTensor(out.size(), device=out.device)         
-            loss = self.__loss_func(out,label_data)
-            loss.backward()
-            result = True 
-        except RuntimeError as e:
-            result = str(e).find("CUDA out of memory") == -1
-        
-        if input_data is not None:
-            del input_data
-        if out is not None:
-            del out
-        if label_data is not None:
-            del label_data
-        if loss is not None:
-            del loss            
-        
+        self.__opt = opt
+        self.__dataset = dataset
+
+    def __loss_batch(self,batches):
+        xdata = self.__xdata_orig.repeat(batches,1,1,1).to(self.__device)
+        ydata = self.__ydata_orig.repeat(batches,1,1,1).to(self.__device)
+        out = self.__net(xdata)
+        loss = self.__loss_func(out, ydata)
+        loss.backward()
+        self.__opt.step()
+        self.__opt.zero_grad()
+        loss_v = float(loss.detach().cpu())
+        max_mem = round(torch.cuda.max_memory_allocated(0)/1000/1000/1.049)
+        del xdata
+        del ydata
+        del out
+        del loss
         torch.cuda.empty_cache()
-        
-        return result
+        torch.cuda.reset_max_memory_allocated()
+        return max_mem        
+    
             
-    def find_max_bs(self):        
-        find_top = True
-        bss = [2]
-        final_bs = 1
-        max_iter = 50
-        c_iter = 0
-        while True:
-            c_iter += 1
-            if c_iter == max_iter:
-                break
-                
-            result = self.check_bs(bss[-1])
-            if result:
-                if find_top:
-                    bss.append(bss[-1]*2)
-                else:
-                    bss.append(int(bss[-1]+((abs(bss[-1] - bss[-2]))/2)))                   
-               
-                if abs(bss[-1]-bss[-2]) < 2:
-                    final_bs = bss[-1]
-                    break
-            else:
-                if find_top:
-                    find_top=False
-                bss.append(int(bss[-1]-((abs(bss[-1] - bss[-2]))/2)))                    
-                
-                if abs(bss[-1]-bss[-2]) == 0:
-                    final_bs = bss[-1]-1
-                    break
-      
+    def find_max_bs(self):
         
-        if final_bs > 5:
-            final_bs = round(final_bs-(final_bs*0.05))
-            
-        return final_bs
+        mems_used = []
+        self.__xdata_orig,self.__ydata_orig = self.__dataset[0]
+        for i in range(3):           
+            mems_used.append(self.__loss_batch(i+1))
+        mems_used = np.array(mems_used[1:])    
+        mebi_per_set = mems_used[1]-mems_used[0]
+        mebi_per_set += mebi_per_set*0.07
+                    
+        return int(round((self.__gpu_info.total() -  self.__gpu_info.used())/mebi_per_set))
