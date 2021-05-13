@@ -111,45 +111,7 @@ def draw_keypoints(image, img_points, heatmap_types, convert_to_RGB=True):
         else:
             raise("heatmap type '" + heatmap_types[i][1]+"' is not implemented for drawing!")
     return image
-    ''' 
-    if centerpoint is not None:
-        image = cv2.circle(image, tuple(centerpoint.astype(np.int)), 3, (255,0,0), 2)        
 
-    if nutedges is not None:
-        nut_mean = np.mean(nutedges, axis=0)
-        #image = cv2.circle(image, tuple(nut_mean.astype(np.int)), 3, (0,255,0), 2)
-        for edge in nutedges:
-            image = cv2.circle(image, tuple(edge.astype(np.int)), 1, (0,255,0), 2)
-
-    if outer_circlepoints is not None:
-        outer_circle_mean = np.mean(outer_circlepoints, axis=0)
-        #image = cv2.circle(image, tuple(outer_circle_mean.astype(np.int)), 3, (0,0,255), 2)
-        for circlep in outer_circlepoints:
-            image = cv2.circle(image, tuple(circlep.astype(np.int)), 1, (0,0,255), 2)                
-
-    if inner_circlepoints is not None:
-        inner_circle_mean = np.mean(inner_circlepoints, axis=0)
-        inner_circle_radius = np.sqrt(np.sum((inner_circle_mean - inner_circlepoints[0])**2))
-        image = cv2.circle(image, tuple(inner_circle_mean.astype(np.int)), 3, (0,255,255), 2)
-        for circlep in inner_circlepoints:
-            image = cv2.circle(image, tuple(circlep.astype(np.int)), 1, (0,255,255), 2)                
-    
-    if (inner_circle_radius is not None) and (nut_mean is not None) and (centerpoint is not None):        
-        means = (outer_circle_mean+nut_mean)/2 if (outer_circle_mean is not None) else nut_mean
-        image = cv2.circle(image, tuple(means.astype(np.int)), 3, (255,0,255), 2)
-        diff_circle = (means-centerpoint)*(-1)
-        x_circle_diff = round((inner_circle_radius_mm * diff_circle[0])/inner_circle_radius,2)
-        y_circle_diff = round((inner_circle_radius_mm * diff_circle[1])/inner_circle_radius,2)        
-        if centerpoint is not None:
-            distance_x = (x_middle - centerpoint[0])
-            distance_y = (y_middle - centerpoint[1])
-            x_center_diff = round((inner_circle_radius_mm * distance_x)/inner_circle_radius,2)
-            y_center_diff = round((inner_circle_radius_mm * distance_y)/inner_circle_radius,2)        
-
-        
-    
-    return image, x_circle_diff, y_circle_diff, x_center_diff, y_center_diff
-    '''
 
 
 
