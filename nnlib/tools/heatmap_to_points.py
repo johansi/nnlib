@@ -1,4 +1,10 @@
-import cv2
+from .helper import *
+
+try:
+    import cv2
+except ModuleNotFoundError :    
+    printing("UNALBE TO IMPORT OpenCV", print_types.WARNING)
+
 import numpy as np
 from numba import njit
 import numba

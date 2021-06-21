@@ -3,7 +3,10 @@ import numba
 from PIL import Image
 import numpy as np
 from .heatmap_to_points import *
-import cv2
+try:
+    import cv2
+except ModuleNotFoundError:
+    printing("UNALBE TO IMPORT OpenCV", print_types.WARNING)  
 
 __all__ = ["square_image","load_image","load_heatmap","batch_and_normalize","show_image_cv","get_image_daheng_camera",
            "get_mean_point_of_activations", "get_image_points", "image_enhance", "draw_middle_lines", "draw_keypoints"]
