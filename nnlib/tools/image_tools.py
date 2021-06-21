@@ -29,9 +29,11 @@ def square_image_njit(image):
     else:    
         return image[:,crop:-crop,...]
 
-def load_image(img_file, convert_mode="RGB", size=(512,512), to_numpy=True, after_open=None):
+def load_image(img_file, convert_mode="RGB", size=(512,512), size_image=True, to_numpy=True, after_open=None):
     "Load PIL.Image from `fn` with `size(height, width)`"
-    img = Image.open(img_file).resize((size[1],size[0])).convert(convert_mode)    
+    img = Image.open(img_file)
+    img = img.resize((size[1],size[0])).convert(convert_mode) if size_image else img.convert(convert_mode)
+
     if  to_numpy:
         img = np.asarray(img)
         
