@@ -29,11 +29,28 @@ import pickle
 import os
 import sys
 
-__all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss"]
+__all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss_New_exlude_explicit", "HeatLoss_background_verta", "HeatLoss_verta", "HeatLoss_allVertas_verta", "HeatLoss_background_allVertas_verta"]
+
+class UnNormalize(object):
+    def __init__(self, mean, std):
+        self.mean = mean
+        self.std = std
+
+    def __call__(self, tensor):
+        """
+        Args:
+            tensor (Tensor): Tensor image of size (C, H, W) to be normalized.
+        Returns:
+            Tensor: Normalized image.
+        """
+        for t, m, s in zip(tensor, self.mean, self.std):
+            t.mul_(s).add_(m)
+            # The normalize code -> t.sub_(m).div_(s)
+        return tensor
 
 class CustomHeatmapDataset(Dataset):
     "CustomImageDataset with `image_files`,`y_func`, `convert_mode` and `size(height, width)`"
-    def __init__(self, data, size=(512,512), grayscale=False, normalize_mean=None, normalize_std=None, data_aug=None, 
+    def __init__(self, data, hull_path, size=(512,512), grayscale=False, normalize_mean=None, normalize_std=None, data_aug=None, 
                  is_valid=False, do_normalize=True, clahe=True):
         
         self.data = data        
@@ -52,11 +69,13 @@ class CustomHeatmapDataset(Dataset):
                 normalize_std = [0.229, 0.224, 0.225]
                                 
         self.normalize = transforms.Normalize(normalize_mean,normalize_std)
+        self.un_normalize = UnNormalize(mean=normalize_mean, std=normalize_std)
+        self.hull_path = hull_path
         self.convert_mode = "L" if grayscale else "RGB"        
         self.data_aug = data_aug
         self.to_t = transforms.ToTensor()
         self.is_valid = is_valid
-        self.do_normalize = do_normalize
+        self.do_normalize = do_normalize        
         
         self.clahe = cv2.createCLAHE(clipLimit=20.0,tileGridSize=(30,30)) if clahe else None
     
@@ -66,60 +85,81 @@ class CustomHeatmapDataset(Dataset):
     def load_labels(self,idx):
         heatmaps = []        
         for fname in self.data[idx][1]:
-            heatmaps.append(load_heatmap(fname, size=self.size))        
+            mask_file = fname.parent/(fname.stem + "_mask"+ fname.suffix)
+            heatmaps.append([load_heatmap(fname, size=self.size),load_heatmap(mask_file, size=self.size)])        
         return heatmaps
+    
+    def load_hull(self, idx):
+        return load_heatmap(self.hull_path/self.data[idx][0].name, size=self.size)        
     
     def apply_clahe(self,img):
         if self.clahe == None:
             return img
         img = np.asarray(img)
         img = self.clahe.apply(img)
-        return Image.fromarray(img)
-                
+        return Image.fromarray(img)                
+    
     def __getitem__(self, idx):          
         
         image = load_image(self.data[idx][0], size=self.size, convert_mode=self.convert_mode, to_numpy=False)        
+                
         labels = self.load_labels(idx)
         
-        image = self.apply_clahe(image)
+        hull = self.load_hull(idx)
         
-        if (not self.is_valid) and (self.data_aug is not None):
-            image, labels = self.data_aug.transform(image, labels)        
+        image = self.apply_clahe(image)
                 
-        labels = self.to_t(np.stack(labels, axis=2))
+        if (not self.is_valid) and (self.data_aug is not None):
+            image, labels, hull = self.data_aug.transform(image, labels, hull)        
+                        
+        hull = torch.squeeze(self.to_t(hull),dim=0).type(torch.bool)        
+                        
+        labels_extraced = [label[0] for label in labels]
+        masks_extraced  = [label[1] for label in labels]
+        
+        labels_extraced = self.to_t(np.stack(labels_extraced, axis=2))
+        masks_extraced = self.to_t(np.stack(masks_extraced, axis=2)).type(torch.bool)
+        
         image = self.to_t(image)
         
         if self.do_normalize:
             image = self.normalize(image)
-                
-        return image,labels    
+                        
+        return self.data[idx][0].stem, image, labels_extraced, masks_extraced, hull    
+        
         
 class RandomRotationImageTarget(transforms.RandomRotation):
-    def __call__(self, img, targets):    
+    def __call__(self, img, targets, hull):    
         angle = self.get_params(self.degrees)
         img = transforms.functional.rotate(img, angle, self.resample, self.expand, self.center)
+        hull = transforms.functional.rotate(hull, angle, self.resample, self.expand, self.center)
         for idx in range(len(targets)):
-            targets[idx] = transforms.functional.rotate(targets[idx], angle, self.resample, self.expand, self.center)
-        return img, targets
+            targets[idx][0] = transforms.functional.rotate(targets[idx][0], angle, self.resample, self.expand, self.center)
+            targets[idx][1] = transforms.functional.rotate(targets[idx][1], angle, self.resample, self.expand, self.center)
+        return img, targets, hull
     
 class RandomHorizontalFlipImageTarget(transforms.RandomHorizontalFlip):
-    def __call__(self, img, targets):    
+    def __call__(self, img, targets, hull):    
         if random.random() < self.p:
             img = transforms.functional.hflip(img)
+            hull = transforms.functional.hflip(hull)
             for idx in range(len(targets)):
-                targets[idx] = transforms.functional.hflip(targets[idx])
-        return img,targets
+                targets[idx][0] = transforms.functional.hflip(targets[idx][0])
+                targets[idx][1] = transforms.functional.hflip(targets[idx][1])
+        return img,targets,hull
 
 class RandomVerticalFlipImageTarget(transforms.RandomVerticalFlip):
-    def __call__(self, img, targets):    
+    def __call__(self, img, targets, hull):    
         if random.random() < self.p:
             img = transforms.functional.vflip(img)
+            hull = transforms.functional.vflip(hull)
             for idx in range(len(targets)):
-                targets[idx] = transforms.functional.vflip(targets[idx])
-        return img,targets
+                targets[idx][0] = transforms.functional.vflip(targets[idx][0])
+                targets[idx][1] = transforms.functional.vflip(targets[idx][1])
+        return img,targets,hull
 
 class RandomPerspectiveImageTarget(transforms.RandomPerspective):
-    def __call__(self, img, targets): 
+    def __call__(self, img, targets, hull): 
         if not transforms.functional._is_pil_image(img):
             raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
 
@@ -127,17 +167,19 @@ class RandomPerspectiveImageTarget(transforms.RandomPerspective):
             width, height = img.size
             startpoints, endpoints = self.get_params(width, height, self.distortion_scale)
             img = transforms.functional.perspective(img, startpoints, endpoints, self.interpolation)
+            hull = transforms.functional.perspective(hull, startpoints, endpoints, self.interpolation)
 
             for idx in range(len(targets)):
-                targets[idx] = transforms.functional.perspective(targets[idx], startpoints, endpoints, self.interpolation)
+                targets[idx][0] = transforms.functional.perspective(targets[idx][0], startpoints, endpoints, self.interpolation)
+                targets[idx][1] = transforms.functional.perspective(targets[idx][1], startpoints, endpoints, self.interpolation)
 
-        return img,targets
+        return img,targets,hull
 
 class ComposeImageTarget(transforms.Compose):
-    def __call__(self, img, targets): 
+    def __call__(self, img, targets, hull): 
             for t in self.transforms:
-                img,targets = t(img, targets)
-            return img,targets 
+                img,targets,hull = t(img, targets, hull)
+            return img,targets,hull 
         
         
 class DataAugmentation:
@@ -158,15 +200,15 @@ class DataAugmentation:
                                                      #transforms.RandomResizedCrop(size=size,scale=(zoom,1.0),ratio=(1.0,1.0))
                                                     ])        
         
-    def transform(self,features,labels):
+    def transform(self,features,labels, hull):
                 
         #do lighting transforms for features
         features = self.lightning_transforms(features)
         
-        #do affine transforms for features and labels
-        features,labels = self.affine_transforms(features, labels)            
+        #do affine transforms for features and labels        
+        features,labels,hull = self.affine_transforms(features, labels, hull)            
         
-        return features,labels      
+        return features,labels,hull     
     
         
 class heatmap_metric(LearnerCallback):    
@@ -300,63 +342,301 @@ class heatmap_metric(LearnerCallback):
                 
         return metrics
 
-    
-class HeatLoss(nn.Module):
-    
-    def forward(self, input, target):                         
-        if target.shape[1] > 1:
-            diffs = torch.zeros(target.shape[1]*3, dtype=torch.float32, device=input.device)
-        else:
-            diffs = torch.zeros(target.shape[1]*2, dtype=torch.float32, device=input.device)
-                   
-        for i in range(target.shape[1]):            
-            entry_t = target[:,i,:,:]            
-            
-            if target.shape[1] > 1:
-                other_mask = torch.ones(target.shape[1], dtype=torch.bool, device=input.device)
-                other_mask[i] = False
-                entry_t_other = target[:,other_mask,:,:]
-                entry_t_m_other = entry_t_other > 0 
-                entry_t_m_other = torch.any(entry_t_m_other, axis=1)
-                                    
-            entry_t_m = entry_t > 0
-            entry_t_m_back = torch.logical_not(entry_t_m)
-            
-            entry_i = input[:,i,:,:]
 
-            diff_entry = torch.abs(entry_i[entry_t_m] - entry_t[entry_t_m]) 
-            diff_entry_back = torch.abs(entry_i[entry_t_m_back] - entry_t[entry_t_m_back]) 
+class HeatLoss_New_exlude_explicit_2(nn.Module):
+    
+    def forward(self, input, target, masks, hull):                 
+        
+        #hull_not = torch.logical_not(hull)
+        feature_count = target.shape[1]
+        loss_items = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        loss_items_union = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        mask_union = torch.any(masks, axis=1)
+        mask_background = torch.logical_not(mask_union)[:,None].repeat(1,feature_count,1,1)      
+        for idx in range(feature_count):
+            #mask_other = torch.ones(feature_count, dtype=torch.bool, device=input.device)
+            #mask_other[idx] = False
             
-            if target.shape[1] > 1:
-                diff_entry_other = torch.abs(entry_i[entry_t_m_other] - entry_t[entry_t_m_other]) 
+            diff_other = torch.abs(input[:,idx,:,:][mask_union] - target[:,idx,:,:][mask_union])                        
+            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
+            if len(diff) > 0:
+                loss_items[idx] = torch.mean(diff)
+            if len(diff_other) > 0:
+                loss_items_union[idx] = torch.mean(diff_other)
 
-            if len(diff_entry) > 0:                
-                diffs[i] = torch.mean(diff_entry)
+        #loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
+        loss_backgrond = torch.mean(torch.abs(input[mask_background] - target[mask_background]))
+        
+        # print loss begin
+        out_str = ""
+        print_items_loss = []
+        
+        for idx in range(len(loss_items)):
+            out_str = out_str + "loss_item_"+str(idx) + " {:.4f} " + "loss_item_union_"+str(idx) + " {:.4f} "
+            print_items_loss.append(round(loss_items[idx].item(),4))
+            print_items_loss.append(round(loss_items_union[idx].item(),4))
+            
+            
+        #print_items_loss.append(round(loss_hull.item(),4))
+        print_items_loss.append(round(loss_backgrond.item(),4))
+        #print((out_str+" loss_hull {:.4f} loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
+        print((out_str+" loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
+        # print loss end        
+        
+        #return (loss_items.sum()+loss_items_union.sum()+loss_hull+loss_backgrond)/((feature_count*2)+2)
+        return (loss_items.sum()+loss_items_union.sum()+loss_backgrond)/((feature_count*2)+1)
+        #return (loss_items.sum()+loss_items_other.sum()+loss_backgrond)/((feature_count*2)+1)
+
+
+class HeatLoss_New_exlude_explicit(nn.Module):
+    
+    def forward(self, input, target, masks, hull): 
+        
+        hull_not = torch.logical_not(hull)
+        feature_count = target.shape[1]
+        loss_items = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        loss_items_other = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        for idx in range(feature_count):
+            mask_other = torch.ones(feature_count, dtype=torch.bool, device=input.device)
+            mask_other[idx] = False
+            mask_other = torch.any(masks[:,mask_other,:,:], axis=1)
+            diff_other = torch.abs(input[:,idx,:,:][mask_other] - target[:,idx,:,:][mask_other])                        
+            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
+            if len(diff) > 0:
+                loss_items[idx] = torch.mean(diff)
+            if len(diff_other) > 0:
+                loss_items_other[idx] = torch.mean(diff_other)
+
                 
-            if len(diff_entry_back) > 0:
-                diffs[i+target.shape[1]] = torch.mean(diff_entry_back)
+        loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
+        loss_backgrond = torch.mean(torch.abs(input[hull_not] - target[hull_not]))
+        
+        # print loss begin
+        out_str = ""
+        print_items_loss = []
+        
+        for idx in range(len(loss_items)):
+            out_str = out_str + "loss_item_"+str(idx) + " {:.4f} " + "loss_item_other_"+str(idx) + " {:.4f} "
+            print_items_loss.append(round(loss_items[idx].item(),4))
+            print_items_loss.append(round(loss_items_other[idx].item(),4))
             
-            if target.shape[1] > 1:
-                if len(diff_entry_other) > 0:
-                    diffs[i+(target.shape[1]*2)] = torch.mean(diff_entry_other)
+            
+        print_items_loss.append(round(loss_hull.item(),4))
+        print_items_loss.append(round(loss_backgrond.item(),4))
+        print((out_str+" loss_hull {:.4f} loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
+        #print((out_str+" loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
+        # print loss end
         
+        return (loss_items.sum()+loss_items_other.sum()+loss_hull+loss_backgrond)/((feature_count*2)+2)
+        #return (loss_items.sum()+loss_items_other.sum()+loss_backgrond)/((feature_count*2)+1)
+
+
+class HeatLoss_OldGen_0(nn.Module):
+    def __init__(self):
+        super().__init__()
+        r"""Class for HeatLoss calculation. This variant includes no masks, simple Mean absolute error over all pixles:                        
+        """           
+    def forward(self, input, target, masks, hull):                
+        return torch.mean(torch.abs(input - target))
+
+class HeatLoss_OldGen_1(nn.Module):
+    def __init__(self, print_out_losses=False):
+        super().__init__()
+        r"""Class for HeatLoss calculation. This variant includes the masks of following objects:            
+            - specific features
+        """       
+        self.print_out_losses = print_out_losses
+
+    def forward(self, input, target, masks, hull):
+        m1 = (target > 0.0)
+        ret1 = torch.abs(input[m1] - target[m1])
+        mean1 = torch.mean(ret1)
         
-        if target.shape[1] > 1:
-            return diffs.sum()/(target.shape[1]*3)
-        else:
-            return diffs.sum()/(target.shape[1]*2)
+        if self.print_out_losses:
+            print("specific features:",mean1.item(), end="\r")
+
+        return mean1    
+        
+class HeatLoss_OldGen_2(nn.Module):
+    def __init__(self, print_out_losses=False):
+        
+        r"""Class for HeatLoss calculation. This variant includes the masks of following objects:
+            - Background (no heat at all)
+            - specific features
+        """             
+        super().__init__()
+        self.print_out_losses = print_out_losses
+
+    def forward(self, input, target, masks, hull):
+        m1 = (target > 0.0)        
+        m2 = torch.logical_not(m1)
+
+        ret1 = torch.abs(input[m1] - target[m1])
+        ret2 = torch.abs(input[m2] - target[m2])        
+
+        mean1 = torch.mean(ret1)
+        mean2 = torch.mean(ret2)
+        
+        if self.print_out_losses:
+            print("specific features:",mean1.item(), "background:",mean2.item(), end="\r")
+
+        return (mean1+mean2)/2
+
+class HeatLoss_OldGen_3(nn.Module):
+    def __init__(self):
+        super().__init__(print_out_losses=False)
+        r"""Class for HeatLoss calculation. This variant includes the masks of following objects:            
+            - specific feature
+            - all features in a image
+        """     
+        self.print_out_losses = print_out_losses
+
+    def forward(self, input, target, masks, hull):
+        m1 = (target > 0.0)
+        m2 = torch.zeros(m1.shape, dtype=torch.bool, device=input.device)        
+
+        for dset in range(input.shape[0]):
+            logor = torch.zeros((input.shape[2], input.shape[3]), dtype=torch.bool, device=input.device)
+            
+            for i in range(input.shape[1]):
+                logor = logor | m1[dset,i,:,:]
+            
+            for i in range(input.shape[1]):
+                m2[dset,i,:,:] = logor                
+
+        ret1 = torch.abs(input[m1] - target[m1])
+        ret2 = torch.abs(input[m2] - target[m2])        
+
+        mean1 = torch.mean(ret1)
+        mean2 = torch.mean(ret2)
+        if  self.print_out_losses:
+            print("specific feature:",mean1.item(), "all features:",mean2.item(), end="\r")
+
+        return (mean1+mean2)/2
+
+class HeatLoss_OldGen_4(nn.Module):
+    def __init__(self):
+        super().__init__(print_out_losses=False)
+        r"""Class for HeatLoss calculation. This variant includes the masks of following objects:            
+            - specific feature
+            - all features in a image
+            - background
+        """   
+        self.print_out_losses = print_out_losses
+
+    def forward(self, input, target, masks, hull):
+        m1 = (target > 0.0)
+        m2 = torch.zeros(m1.shape, dtype=torch.bool, device=input.device)
+        m3 = torch.logical_not(m1)
+
+        for dset in range(input.shape[0]):
+            logor = torch.zeros((input.shape[2], input.shape[3]), dtype=torch.bool, device=input.device)
+            
+            for i in range(input.shape[1]):
+                logor = logor | m1[dset,i,:,:]
+            
+            for i in range(input.shape[1]):
+                m2[dset,i,:,:] = logor                
+
+        ret1 = torch.abs(input[m1] - target[m1])
+        ret2 = torch.abs(input[m2] - target[m2])
+        ret3 = torch.abs(input[m3] - target[m3])
+
+        mean1 = torch.mean(ret1)
+        mean2 = torch.mean(ret2)
+        mean3 = torch.mean(ret3)
+        if self.print_out_losses:
+            print("specific feature:",mean1.item(), "all features:",mean2.item(), "background:",mean3.item(), end="\r")
+
+        return (mean1+mean2+mean3)/3  
+
+class HeatLoss_NextGen_0(nn.Module):
+    def __init__(self):
+        super().__init__(print_out_losses=False)
+        r"""Class for Next Generation HeatLoss calculation. This variant includes offline generated masks of following objects:            
+            - specific feature with mask dilation (single loss calculation for every feature)
+            - convex hull of all featureswith maks dilation
+            - background
+        """   
+        self.print_out_losses = print_out_losses
+        
+    def forward(self, input, target, masks, hull):                
+        
+        hull_not = torch.logical_not(hull)
+        feature_count = target.shape[1]
+        loss_items = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        for idx in range(feature_count):
+            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
+            if len(diff) > 0:
+                loss_items[idx] = torch.mean(diff)
+            
+        loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
+        loss_backgrond = torch.mean(torch.abs(input[hull_not] - target[hull_not]))
+        
+        if self.print_out_losses:
+            # print loss begin
+            out_str = ""
+            print_items_loss = []
+            sum_items_loss = torch.zeros(1, dtype=torch.float32, device=input.device)
+            for idx in range(len(loss_items)):
+                out_str = out_str + "loss_item_"+str(idx) + " {:.4f} "
+                print_items_loss.append(round(loss_items[idx].item(),4))
+                sum_items_loss += loss_items[idx]
+
+            print_items_loss.append(round(loss_hull.item(),4))
+            print_items_loss.append(round(loss_backgrond.item(),4))
+            print((out_str+" loss_hull {:.4f} loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
+            # print loss end        
+        
+        return (sum_items_loss+loss_hull+loss_backgrond)/(feature_count+2)
+
+    
+class HeatLoss_NextGen_1(nn.Module):
+    def __init__(self):
+        super().__init__(print_out_losses=False)
+        r"""Class for Next Generation HeatLoss calculation. This variant includes offline generated masks of following objects:            
+            - specific feature with mask dilation (calculation of feature loss all the same)
+            - convex hull of all featureswith maks dilation
+            - background
+        """   
+        self.print_out_losses = print_out_losses
+        
+    def forward(self, input, target, masks, hull):                
+        
+        hull_not = torch.logical_not(hull)
+        
+        loss_features = torch.mean(torch.abs(input[masks] - target[masks]))
+        loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
+        loss_backgrond = torch.mean(torch.abs(input[hull_not] - target[hull_not]))        
+        
+        if self.print_out_losses:
+            print(("loss_features {:.4f} loss_hull {:.4f} loss_backgrond {:.4f}").format(loss_features,loss_hull,loss_backgrond), end="\r")               
+        
+        return (loss_features+loss_hull+loss_backgrond)/3      
 
 class HeatmapLearner:
-    def __init__(self, features, root_path, images_path, size=(512,512), bs=-1, items_count=-1, gpu_id=0, 
+    def __init__(self, features, root_path, images_path, hull_path, size=(512,512), bs=-1, items_count=-1, gpu_id=0, 
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
                  unet_init_features=16, valid_images_store="valid_images.npy", image_convert_mode="L", metric_counter=1, 
-                 sample_img=None, true_positive_threshold=0.02, ntype="unet", lr=1e-03, file_filters=None, clahe=False):
+                 sample_img=None, true_positive_threshold=0.02, ntype="unet", lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False,
+                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0):
         
         r"""Class for train an Unet-style Neural Network, for heatmap based image recognition
 
         Args:
-            size       : Size of images to pass through the neural network. The sizes must be a power of two (Heigth, Width).
-            norm_stats : Normalize values for images in the form (mean,std).
+            features     :  Heatmap features for the neural net. This must be a dict. The Keys must be the folder names for the heatmap features.
+                            Every entry is a dict with the feature types: single_point, multi_point, circle
+                            Example:
+                            {"feature_1":{"type":"single_point"},
+                             "feature_2":{"type":"multi_point"},
+                             "feature_3":{"type":"circle"}}  
+            root_path    :  The root path, where image files and label files are located
+            images_path  :  The path, where the images are located, in relation to the root_path            
+            size         :  Size of images to pass through the neural network. The sizes must be a power of two with the dimensions of (Heigth, Width).
+            bs           :  The Batch Size
+            norm_stats   :  Normalize values for images in the form (mean,std).
+            file_filters_incluce :  incluce file filter in images_path, must be a list with include search strings
+            file_filters_exclude :  exclude file filter in images_path, must be a list with exclude search strings
         Example:
 
         """        
@@ -373,11 +653,12 @@ class HeatmapLearner:
         self.__size = size
         self.__root_path = Path(root_path)
         self.__images_path = Path(images_path)
+        self.__hull_path = self.__root_path/Path(hull_path)
         self.__sample_results_path = Path(sample_results_path)  
         (self.__root_path/self.__sample_results_path).mkdir(parents=True, exist_ok=True)
         
         self.__gpu_id = gpu_id
-        
+        self.__file_prefix = file_prefix
         data_aug = DataAugmentation() if data_aug is None else data_aug
         
         if norm_stats is None:
@@ -386,9 +667,9 @@ class HeatmapLearner:
         if sample_img is None:
             t_img_files = glob.glob(str(self.__root_path/self.__images_path/"*"))
             idx = random.randint(0, len(t_img_files)-1)
-            self.__sample_img = Path(t_img_files[idx]).name            
+            self.__sample_img = self.__root_path/self.__images_path/Path(t_img_files[idx]).name            
         else:
-            self.__sample_img = sample_img
+            self.__sample_img = self.__root_path/self.__images_path/sample_img        
         
         true_positive_threshold = round(true_positive_threshold*self.__size[0])        
         
@@ -398,28 +679,38 @@ class HeatmapLearner:
         self.__valid_losses = None
         self.__metrics = None        
         
-        file_filters = np.array(file_filters) if file_filters is not None else None
+        file_filters_include = np.array(file_filters_include) if file_filters_include is not None else None
+        file_filters_exclude = np.array(file_filters_exclude) if file_filters_exclude is not None else None
         
-        self.__create_learner(file_filters=file_filters, valid_images_store=valid_images_store, items_count=items_count,
+        self.__create_learner(file_filters_include=file_filters_include, file_filters_exclude=file_filters_exclude, valid_images_store=valid_images_store, items_count=items_count,
                               features=features, bs=bs, data_aug=data_aug,image_convert_mode=image_convert_mode, 
                               heatmap_paths=heatmap_paths, true_positive_threshold=true_positive_threshold, metric_counter=metric_counter,
-                              lr=lr, clahe=clahe, norm_stats=norm_stats, unet_init_features=unet_init_features, ntype=ntype)
+                              lr=lr, clahe=clahe, norm_stats=norm_stats, unet_init_features=unet_init_features, ntype=ntype, disable_metrics=disable_metrics, loss_func=loss_func,
+                              weight_decay = weight_decay)
         
-    def __create_learner(self, file_filters, valid_images_store, items_count, features, bs, data_aug, 
+    def __create_learner(self, file_filters_include, file_filters_exclude, valid_images_store, items_count, features, bs, data_aug, 
                          image_convert_mode, heatmap_paths, true_positive_threshold, metric_counter, lr, clahe, norm_stats, 
-                         unet_init_features, ntype):
+                         unet_init_features, ntype, disable_metrics, loss_func, weight_decay):
                                 
-        training_data, valid_data = self.__load_data(features=features,file_filters=file_filters,
-                                                     valid_images_store=valid_images_store, items_count=items_count)                       
-
-        torch.cuda.set_device(self.__gpu_id)                        
+        training_data, valid_data = self.__load_data(features=features,file_filters_include=file_filters_include,
+                                                     file_filters_exclude = file_filters_exclude, valid_images_store=valid_images_store, 
+                                                     items_count=items_count)                       
+                                      
         self.__unet_in_channels = 1 if image_convert_mode == "L" else 3
         self.__unet_out_channls = len(heatmap_paths)                                                    
-
-        self.train_dataset = CustomHeatmapDataset(data=training_data, grayscale=image_convert_mode == "L", 
+                
+        heatmap_files_sample = []
+        for feat in features.keys():
+                heatmap_files_sample.append(self.__root_path/feat/self.__sample_img.name)                                        
+        
+        self.sample_dataset = CustomHeatmapDataset(data=np.array([[self.__sample_img,heatmap_files_sample]]), hull_path=self.__hull_path, grayscale=image_convert_mode == "L", 
+                                                  normalize_mean=norm_stats[0],normalize_std=norm_stats[1], is_valid=True, 
+                                                  clahe=clahe) 
+        
+        self.train_dataset = CustomHeatmapDataset(data=training_data, hull_path=self.__hull_path, grayscale=image_convert_mode == "L", 
                                                   normalize_mean=norm_stats[0],normalize_std=norm_stats[1], data_aug=data_aug, clahe=clahe)
 
-        self.valid_dataset = CustomHeatmapDataset(data=valid_data, grayscale=image_convert_mode == "L",
+        self.valid_dataset = CustomHeatmapDataset(data=valid_data, hull_path=self.__hull_path, grayscale=image_convert_mode == "L",
                                                   normalize_mean=norm_stats[0],normalize_std=norm_stats[1], is_valid=True, clahe=clahe)                                
 
 
@@ -434,25 +725,28 @@ class HeatmapLearner:
                 masks.append(heat)
             sample_img = (img,masks)
 
-        metric = heatmap_metric(features = features, true_positive_threshold = true_positive_threshold, metric_counter = metric_counter)
+        metric = None if disable_metrics else heatmap_metric(features = features, true_positive_threshold = true_positive_threshold, metric_counter = metric_counter)
         
         net = self.__get_net(ntype, unet_init_features).to(torch.device("cuda:"+str(self.__gpu_id)))
-        opt = torch.optim.Adam(net.parameters(), lr) 
-        loss_func = HeatLoss().to(torch.device("cuda:"+str(self.__gpu_id)))    
+        opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay)
         
-        if bs == -1:              
-            batch_estimator = Batch_Size_Estimator(net=net, opt=opt,loss_func=loss_func, gpu_id=self.__gpu_id,
-                                                           dataset = self.train_dataset)
-            bs = batch_estimator.find_max_bs()  
-                     
+        loss_func = HeatLoss_NextGen_1() if loss_func is None else loss_func       
+        loss_func = loss_func.to(torch.device("cuda:"+str(self.__gpu_id)))
+        
+        if bs == -1:      
             
+            batch_estimator = Batch_Size_Estimator(net=net, opt=opt,
+                                                   loss_func=loss_func, 
+                                                   gpu_id=self.__gpu_id, dataset = self.train_dataset)
+            bs = batch_estimator.find_max_bs()
+                                 
         train_dl = DataLoader(self.train_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)
         valid_dl = DataLoader(self.valid_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)                                                       
 
-        self.learner = Learner(model=net,train_dl=train_dl, valid_dl=valid_dl,
-                               loss_func=loss_func,optimizer=opt, learner_callback= metric)                 
-        
-   
+        self.learner = Learner(model=net,loss_func=loss_func, train_dl=train_dl, valid_dl=valid_dl,
+                               optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id,
+                               predict_smaple_func=self.predict_sample)                 
+           
     def __get_net(self, ntype, unet_init_features):
         if ntype == "res_unet++":
              net = UNet(in_channels = self.__unet_in_channels, out_channels = self.__unet_out_channls,
@@ -482,12 +776,18 @@ class HeatmapLearner:
             net = UNet(in_channels = self.__unet_in_channels, out_channels = self.__unet_out_channls,
                         init_features = unet_init_features, resblock=False, squeeze_excite=False, 
                         aspp=False, attention=False, bn_relu_at_first=False, bn_relu_at_end=True)
+        elif ntype == "res34":
+                    net = UNet(in_channels = self.__unet_in_channels, out_channels = self.__unet_out_channls,
+                               init_features = unet_init_features, resblock=True, squeeze_excite=False, 
+                               aspp=False, attention=False, bn_relu_at_first=True, bn_relu_at_end=False,
+                               block_sizes_down = res34_downsample, downsample_method=downsample_stride,
+                               blocksize_bottleneck = 2, block_sizes_up=[2,2,2,2])            
         else:
             raise("Net type ´"+ ntype+"´ is not implemented!")     
             
         return net
     
-    def __load_data(self, features, file_filters, valid_images_store, items_count):
+    def __load_data(self, features, file_filters_include, file_filters_exclude, valid_images_store, items_count):
         
         def find_valid_imgs_func(all_image_files):
             if not (self.__root_path/valid_images_store).is_file():
@@ -496,17 +796,32 @@ class HeatmapLearner:
             return list(np.load(self.__root_path/valid_images_store, allow_pickle=True))            
 
         def filter_files(all_image_files):
-            if file_filters is None:
-                return all_image_files
-
-            new_filenames = []
-            for filename in all_image_files:
-                for ffilter in file_filters:
-                    if filename.name.find((ffilter)) != -1:
+            
+            if file_filters_include is not None:
+                new_filenames = []
+                for filename in all_image_files:
+                    for ffilter in file_filters_include:
+                        if filename.name.find((ffilter)) != -1:
+                            new_filenames.append(filename)
+                            break
+                all_image_files = np.array(new_filenames) 
+            
+            if file_filters_exclude is not None:
+                new_filenames = []
+                for filename in all_image_files:
+                    include_in = True
+                    
+                    for ffilter in file_filters_exclude:
+                        if filename.name.find((ffilter)) != -1:
+                            include_in = False                            
+                            break
+                    
+                    if include_in:
                         new_filenames.append(filename)
-                        break
-
-            return np.array(new_filenames) 
+                
+                all_image_files = np.array(new_filenames) 
+                
+            return all_image_files
 
 
         all_image_files = list((self.__root_path/self.__images_path).glob("*.png"))
@@ -539,9 +854,9 @@ class HeatmapLearner:
         filename = "losses" if filename is None else filename
                 
         if train:
-            np.save(self.__root_path/self.__sample_results_path/(filename+"_train.npy"), self.__train_losses)
+            np.save(self.__root_path/self.__sample_results_path/(self.__file_prefix+filename+"_train.npy"), self.__train_losses)
         if valid:
-            np.save(self.__root_path/self.__sample_results_path/(filename+"_valid.npy"), self.__valid_losses)
+            np.save(self.__root_path/self.__sample_results_path/(self.__file_prefix+filename+"_valid.npy"), self.__valid_losses)
             
     def get_metric_names(self):        
         return np.array(self.learner.metric_names)
@@ -552,7 +867,7 @@ class HeatmapLearner:
         filename = "metrics" if filename is None else filename
         
         data = {"names":self.get_metric_names(),"metrics":self.__metrics}
-        pickle.dump(data, open(self.__root_path/self.__sample_results_path/(filename+".pkl"),"wb"))
+        pickle.dump(data, open(self.__root_path/self.__sample_results_path/(self.__file_prefix+filename+".pkl"),"wb"))
 
     
     def get_metrics(self, specific_metric_names=None):        
@@ -591,9 +906,8 @@ class HeatmapLearner:
             
         return result[0] if len(result) == 1 else result
                 
-    def fit(self,epochs):                        
-                
-        self.learner.fit(epochs)
+    def fit(self,epochs,one_cylce=True):
+        self.learner.fit(epochs, one_cylce)
         self.__epochs += epochs
         
         train_loss, valid_loss = self.learner.get_losses()
@@ -609,7 +923,10 @@ class HeatmapLearner:
             self.__valid_losses = np.concatenate((self.__valid_losses, valid_loss))                        
             
         metrics = self.learner.get_metrics()
-        self.__metrics = np.concatenate((self.__metrics, metrics), axis=0) if self.__metrics is not None else metrics        
+        self.__metrics = np.concatenate((self.__metrics, metrics), axis=0) if self.__metrics is not None else metrics                
+    
+    def set_loss_func(self,loss_func):        
+        self.learner.set_loss_func(loss_func().to(torch.device("cuda:"+str(self.__gpu_id))))        
         
     def load_from_file(self,filename=None):
         
@@ -627,16 +944,14 @@ class HeatmapLearner:
     def save_to_file(self,filename=None):
         (self.__root_path/"models").mkdir(parents=True, exist_ok=True)
         
-        filename = "model" if filename is None else filename
-            
-        self.learner.model
+        filename = "model" if filename is None else filename                    
         
         torch.save({'epochs': self.__epochs,
                     'train_losses':self.__train_losses,
                     'valid_losses':self.__valid_losses,
                     'metrics':self.__metrics,
                     'model': self.learner.model.state_dict(),
-                    'optimizer': self.learner.optimizer.state_dict()}, self.__root_path/"models"/(filename+".pth"))        
+                    'optimizer': self.learner.optimizer.state_dict()}, self.__root_path/"models"/(self.__file_prefix+filename+".pth"))        
                 
     def export_to_onnx(self, filename=None, batch_size=1):
         
@@ -655,7 +970,7 @@ class HeatmapLearner:
         filename = "export" if filename is None else filename 
                 
         torch_out = self.learner.model(batch)
-        torch.onnx.export(self.learner.model, batch,onnx_export/(filename+".onnx"), 
+        torch.onnx.export(self.learner.model, batch,onnx_export/(self.__file_prefix+filename+".onnx"), 
                           verbose=True, input_names=input_names, output_names=output_names)
         
         def test_onnx():            
@@ -700,8 +1015,8 @@ class HeatmapLearner:
             elif image.shape[0] == 3:
                 ax.imshow(image.permute(1,2,0))        
 
-        def show_label_func(ax, heatmaps):   
-            ax.set_title("features on image")           
+        def show_label_func(ax, heatmaps, name):   
+            ax.set_title(name)           
             for heatmap,feature  in zip(heatmaps, list(self.features.keys())):
                 type_of = self.features[feature]["type"]
                 if (type_of == "circle"):            
@@ -721,40 +1036,37 @@ class HeatmapLearner:
                     raise("The Heatmaptype " + type_of + " is not implemented yet.")            
         
         dataset = self.train_dataset if train else self.valid_dataset
+        #
         train_dataloader = DataLoader(dataset, batch_size=count_img, shuffle=True, num_workers=num_workers())
         data_iter = iter(train_dataloader)
-        images, labels = next(data_iter)    
+        names, images, labels, masks, hulls = next(data_iter)    
         nrows = ceil(count_img/3)
         f,axes = plt.subplots(nrows=nrows,ncols=3,figsize=(15,5*nrows))
         axes = axes.flatten()[:count_img]
-        for image,label,ax in zip(images, labels, axes.flatten()):
+        for name, image,label,ax in zip(names, images, labels, axes.flatten()):
             show_feat_func(ax, image)
-            show_label_func(ax, label)                
+            show_label_func(ax, label, name)                
                 
-    def predict(self,image): 
-        raise("TODO Implement !")
-        
-    def predict_sample(self):
+    def predict(self,inp, eval_mode=True):        
+        return self.learner.predict(inp[None].to(torch.device("cuda:"+str(self.__gpu_id))), eval_mode=eval_mode).detach().cpu()
+                        
+    def predict_sample(self, epoch):                  
+        name, image, label, mask, hull  = self.sample_dataset[0]
+        image_un_norm = self.sample_dataset.un_normalize(image)
+        channels = image.data.shape[0]
+        shape = (image.data.shape[1], image.data.shape[2])
+        img = np.zeros((shape[0]*2,shape[1]+(shape[1]*len(label)),channels), dtype=np.float)        
+        img[:shape[0],:shape[1],:] = image_un_norm.data.permute(1,2,0)
+        for idx in range(len(label)):
+            img[:shape[0],shape[1]*(idx+1):shape[1]*(idx+2),:] = label[idx].repeat(channels,1,1).permute(1,2,0)
 
-        sample_img = self.__sample_img
-        if (sample_img is not None) and (self.__sample_results_path is not None):
+        res = torch.squeeze(self.predict(image, eval_mode=False), dim=0)        
+        for idx in range(res.shape[0]):
+            img[shape[0]:shape[0]*2,shape[1]*(idx+1):shape[1]*(idx+2),:] = res[idx][None].repeat(channels,1,1).permute(1,2,0)
 
-            channels = sample_img[0].data.shape[0]
-            shape = sample_img[0].data.shape[1]
-            img = np.zeros((shape*2,shape+(shape*len(sample_img[1])),channels), dtype=np.float)        
-            img[:shape,:shape,:] = sample_img[0].data.permute(1,2,0)
-            for idx in range(len(sample_img[1])):
-                img[:shape,shape*(idx+1):shape*(idx+2),:] = sample_img[1][idx].repeat(channels,1,1).permute(1,2,0)
+        img = np.round(np.interp(img, (img.min(), img.max()), (0, 255))).astype(np.uint8)            
+        if channels == 3:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-            res = self.predict(sample_img[0])[0].data.detach().cpu()
-
-            for idx in range(res.shape[0]):
-                img[shape:shape*2,shape*(idx+1):shape*(idx+2),:] = res[idx][None].repeat(channels,1,1).permute(1,2,0)
-
-            img = np.round(np.interp(img, (img.min(), img.max()), (0, 255))).astype(np.uint8)            
-            if channels == 3:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-
-            self.__sample_results_path.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(self.__sample_results_path/("epoch_"+str(self.__counter_epoch)+".png")), img)
+        self.__sample_results_path.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(self.__root_path/self.__sample_results_path/(self.__file_prefix+"epoch_"+str(self.__epochs+epoch)+".png")), img)                    
