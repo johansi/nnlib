@@ -8,8 +8,9 @@ try:
 except ModuleNotFoundError:
     printing("UNALBE TO IMPORT OpenCV", print_types.WARNING)  
 
-__all__ = ["square_image","load_image","load_heatmap","batch_and_normalize","show_image_cv","get_image_daheng_camera",
-           "get_mean_point_of_activations", "get_image_points", "image_enhance", "draw_middle_lines", "draw_keypoints"]
+__all__ = ["gray_norm_stats","rgb_norm_stats","square_image","load_image","load_heatmap","batch_and_normalize", "batch_and_normalize_njit",
+           "show_image_cv","get_image_daheng_camera","get_mean_point_of_activations", "get_image_points", "image_enhance", "draw_middle_lines", 
+           "draw_keypoints"]
 
 
 gray_norm_stats = ([0.131],[0.308])
@@ -46,7 +47,25 @@ def load_heatmap(fn, size=(512,512)):
     "Load mask in PIL.Image from `fn` with `size(height, width)`"
     return load_image(fn, size=size, convert_mode="L", to_numpy=False)
 
-def batch_and_normalize(img, mean, std):
+@njit(parallel=True)
+def batch_and_normalize_njit(img, mean, std): 
+    img = np.expand_dims((np.transpose(img,(2,0,1))),axis=0)
+    for c in prange(3):
+        m = mean[c]
+        s = std[c]
+        for x in range(256):
+            for y in range(256):
+                img[0,c,x,y] = ((img[0,c,x,y]/255)-m)/s                
+                    
+    return img
+
+def batch_and_normalize(img, mean=None, std=None):
+    
+    if mean is None:
+        mean = gray_norm_stats[0] if len(img.shape) == 2 else rgb_norm_stats[0]
+    if std is None:
+        std = gray_norm_stats[1] if len(img.shape) == 2 else rgb_norm_stats[1]
+
     data = ((img/255)-mean) / std
     data = data if len(data.shape) == 3 else data[None]
     return data[None]
