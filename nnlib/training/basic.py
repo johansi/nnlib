@@ -9,7 +9,7 @@ __all__ = ["LearnerCallback", "Learner"]
 class LearnerCallback(): 
     
     def get_metric_names(self):
-        return
+        return []
     
     def on_train_begin(self):
         return
@@ -32,7 +32,7 @@ class LearnerCallback():
 
 class Learner:
     
-    def __init__(self, model, train_dl, valid_dl, loss_func, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None):        
+    def __init__(self, model, loss_func, train_dl, valid_dl, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None):        
         self.device = torch.device("cuda:"+str(gpu_id))
         self.predict_smaple_func = predict_smaple_func if predict_smaple_func is not None else lambda : None        
         self.model = model
@@ -46,30 +46,37 @@ class Learner:
         self.train_losses = None
         self.valid_losses = None
                             
-    def loss_batch(self, x_data, y_data, is_train=True):
+    def set_loss_func(self, loss_func):
+        self.loss_func = loss_func
+    
+    def loss_batch(self, x_data, y_data, masks, hulls, scheduler=None, is_train=True):
         "Calculate loss and metrics for a batch."    
         
         self.learner_callback.on_batch_begin(x_data, y_data, train=is_train)
+        self.optimizer.zero_grad()        
         out = self.model(x_data)                
-        loss = self.loss_func(out, y_data)
+        loss = self.loss_func(out, y_data, masks, hulls)
         if is_train:
             loss.backward()
             self.optimizer.step()
-            self.optimizer.zero_grad()
-        
+            if scheduler is not None:
+                scheduler.step()
+                    
         self.learner_callback.on_batch_end(out.detach().cpu(), y_data.detach().cpu(), train=is_train)
         return float(loss.detach().cpu())
     
-    def validate(self,dl,parrent_bar):
-        "Calculate `loss_func` of `model` on `dl` in evaluation mode."
+    def validate(self,parrent_bar):
+        "Calculate `loss_func` in evaluation mode."
         self.model.eval()
         with torch.no_grad():
             val_losses = []
             
-            for x_data,y_data in progress_bar(self.valid_dl, parent=parrent_bar):                
+            for names,x_data,y_data, masks, hulls in progress_bar(self.valid_dl, parent=parrent_bar):                
                 x_data = x_data.to(self.device)
-                y_data = y_data.to(self.device)                                              
-                val_loss = self.loss_batch(x_data, y_data, is_train=False)
+                y_data = y_data.to(self.device)
+                masks = masks.to(self.device)
+                hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)
+                val_loss = self.loss_batch(x_data, y_data, masks, hulls, is_train=False)
                 parrent_bar.child.comment = str(round(val_loss,4))
                 val_losses.append(val_loss)
 
@@ -86,32 +93,44 @@ class Learner:
             
         return losses[0] if len(losses) == 1 else losses                        
             
+    def predict(self, inp, eval_mode=True):
+        if eval_mode:
+            self.model.eval()
+            with torch.no_grad():
+                return self.model(inp)
+        else:
+            return self.model(inp)
+            
     def get_metrics(self):
         return np.array(self.metrics)
 
-    def fit(self, epochs):
+    def fit(self, epochs, one_cylce=True):
+        assert self.loss_func is not None, "loss function not definied!"
         self.train_losses = []
         self.valid_losses = []
         self.metrics = []
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=self.optimizer.param_groups[0]["lr"]*10, steps_per_epoch=len(self.train_dl), epochs=epochs) if one_cylce else None
         pbar = master_bar(range(epochs))
         pbar.write(["Epoch","train_loss","valid_loss"] + self.metric_names + ["time"], table=True)
         self.learner_callback.on_train_begin()
-        for epoch in pbar:
+        for epoch in pbar:            
             t1 = time()
             self.model.train()
             self.learner_callback.on_epoch_begin()
             
-            for x_data,y_data in progress_bar(self.train_dl, parent=pbar):                
+            for names,x_data,y_data, masks, hulls in progress_bar(self.train_dl, parent=pbar):                
                 x_data = x_data.to(self.device)
-                y_data = y_data.to(self.device)                
-                train_loss = self.loss_batch(x_data, y_data, is_train=True)                
+                y_data = y_data.to(self.device)
+                masks = masks.to(self.device)
+                hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)                
+                train_loss = self.loss_batch(x_data, y_data, masks, hulls, scheduler=scheduler, is_train=True)                
                 pbar.child.comment = str(round(train_loss,4))
                                             
-            valid_loss = self.validate(self.valid_dl, parrent_bar=pbar)
+            valid_loss = self.validate(parrent_bar=pbar)
             
             self.train_losses.append(train_loss)
             self.valid_losses.append(valid_loss)
-            self.predict_smaple_func()
+            self.predict_smaple_func(epoch)
             met = self.learner_callback.on_epoch_end()
             
             t2 = time()            
