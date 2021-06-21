@@ -11,12 +11,23 @@ except ModuleNotFoundError:
 __all__ = ["square_image","load_image","load_heatmap","batch_and_normalize","show_image_cv","get_image_daheng_camera",
            "get_mean_point_of_activations", "get_image_points", "image_enhance", "draw_middle_lines", "draw_keypoints"]
 
-@njit
+
+gray_norm_stats = ([0.131],[0.308])
+rgb_norm_stats = ([0.485, 0.456, 0.406],[0.229, 0.224, 0.225])
+
 def square_image(image):
-    if image.shape[1] == image.shape[0]:
+    image = square_image_njit(image)
+    if image.shape[0] != image.shape[1]:
+        image = cv2.resize(image, (image.shape[0],image.shape[0]))
+    return image
+    
+@njit
+def square_image_njit(image):
+    crop = int(abs(image.shape[1] - image.shape[0])/2)    
+    if (crop == 0):
         return image
-    crop = int(abs(image.shape[1] - image.shape[0])/2)
-    return image[:,crop:-crop,...]
+    else:    
+        return image[:,crop:-crop,...]
 
 def load_image(img_file, convert_mode="RGB", size=(512,512), to_numpy=True, after_open=None):
     "Load PIL.Image from `fn` with `size(height, width)`"
