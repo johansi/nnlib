@@ -2,9 +2,10 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+from torch.nn.utils import weight_norm
 import pdb
 
-__all__ = ["UNet"]
+__all__ = ["UNet","res34_downsample", "downsample_none", "downsample_maxpool", "downsample_stride", "upsample_none", "upsample_upsample", "upsample_conv"]
 
 res34_downsample = [3,4,6,3]
 
@@ -16,6 +17,21 @@ upsample_none = 0
 upsample_upsample = 1
 upsample_conv = 2
 
+
+def init_default(m, func=nn.init.kaiming_normal_):
+    "Initialize `m` weights with `func` and set `bias` to 0."
+    if func:
+        if hasattr(m, 'weight'): func(m.weight)
+        if hasattr(m, 'bias') and hasattr(m.bias, 'data'): m.bias.data.fill_(0.)
+    return m
+
+def conv_2d(ni, nf, kernel_size, bias=True, stride=1, padding=0, dilation=1, transpose=False):
+    conv_func = nn.Conv2d if not transpose else nn.ConvTranspose2d
+    conv = conv_func(ni, nf, kernel_size, bias=bias, padding=padding,stride=stride, dilation=dilation)
+    #conv = init_default(conv)
+    #conv = weight_norm(conv)
+    return conv        
+
 class AttentionBlock(nn.Module):
     def __init__(self, in_channels_encoder, in_channels_decoder, features):
         super(AttentionBlock, self).__init__()
@@ -23,20 +39,20 @@ class AttentionBlock(nn.Module):
         self.conv_encoder = nn.Sequential(
             nn.BatchNorm2d(in_channels_encoder),
             nn.ReLU(),
-            nn.Conv2d(in_channels_encoder, features, 3, padding=1),
+            conv_2d(in_channels_encoder, features, 3, padding=1),
             nn.MaxPool2d(2, 2),
         )
 
         self.conv_decoder = nn.Sequential(
             nn.BatchNorm2d(in_channels_decoder),
             nn.ReLU(),
-            nn.Conv2d(in_channels_decoder, features, 3, padding=1),
+            conv_2d(in_channels_decoder, features, 3, padding=1),
         )
 
         self.conv_attn = nn.Sequential(
             nn.BatchNorm2d(features),
             nn.ReLU(),
-            nn.Conv2d(features, 1, 1),
+            conv_2d(features, 1, 1),
         )
 
     def forward(self, decoder, encoder):        
@@ -50,7 +66,7 @@ class ASPP(nn.Module):
 
         if downsampling == downsample_stride:
             self.down = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 3, stride=2, padding=0),
+                conv_2d(in_channels, in_channels, 3, stride=2, padding=0),
                 nn.BatchNorm2d(features),
                 nn.ReLU(inplace=True),            
             )
@@ -58,28 +74,28 @@ class ASPP(nn.Module):
             self.down = nn.MaxPool2d(kernel_size=2, stride=2)        
         
         self.aspp_block1 = nn.Sequential(
-            nn.Conv2d(
+            conv_2d(
                 in_channels, features, 3, stride=1, padding=rate[0], dilation=rate[0]
             ),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(features),
         )
         self.aspp_block2 = nn.Sequential(
-            nn.Conv2d(
+            conv_2d(
                 in_channels, features, 3, stride=1, padding=rate[1], dilation=rate[1]
             ),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(features),
         )
         self.aspp_block3 = nn.Sequential(
-            nn.Conv2d(
+            conv_2d(
                 in_channels, features, 3, stride=1, padding=rate[2], dilation=rate[2]
             ),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(features),
         )
 
-        self.output = nn.Conv2d(len(rate) * features, features, 1)
+        self.output = conv_2d(len(rate) * features, features, 1)
         self._init_weights()
         self.downsampling=downsampling
 
@@ -133,7 +149,7 @@ class UpSample(nn.Module):
         if upsample_method == upsample_upsample:
             self.up = nn.Upsample(scale_factor=2, mode='bilinear')
         else:            
-            self.up = nn.ConvTranspose2d(in_channels, features, kernel_size=2, stride=2, bias=bias)            
+            self.up = conv_2d(in_channels, features, kernel_size=2, stride=2, bias=bias, transpose=True)            
             
     def forward(self, x):
         return self.up(x)
@@ -143,7 +159,7 @@ class ConvLayer(nn.Module):
     def __init__(self, in_channels, features,kernel_size=3,padding=1,stride=1, bn_relu=True,bias=True):
         super(ConvLayer, self).__init__()
         layers = OrderedDict([])
-        layers["conv"] = nn.Conv2d(in_channels=in_channels,out_channels=features,kernel_size=3,padding=1,stride=stride,bias=bias)         
+        layers["conv"] = conv_2d(in_channels,features,kernel_size,padding=padding,stride=stride,bias=bias)         
         if bn_relu:
             layers["bn_relu"] = nn.Sequential(nn.BatchNorm2d(num_features=features),nn.ReLU(inplace=True))
         
@@ -168,7 +184,7 @@ class Block(nn.Module):
         if (downsample == downsample_none) or (downsample == downsample_maxpool):
             layers["conv1"] = ConvLayer(in_channels,features)            
         elif downsample == downsample_stride:
-            layers["conv1"] = ConvLayer(in_channels,features, padding=0,stride=2)
+            layers["conv1"] = ConvLayer(in_channels,features, kernel_size=2, padding=0,stride=2)
             
         layers["conv2"] = ConvLayer(features,features, bn_relu=bn_relu_at_end)
         
@@ -178,8 +194,8 @@ class Block(nn.Module):
         self.block = nn.Sequential(layers)
         
         if resblock:
-            params_skip_conn = (1,1) if (downsample == downsample_none) or (downsample == downsample_maxpool) else (0,2)
-            self.skip_conn = nn.Sequential(nn.Conv2d(in_channels,features,kernel_size=3,padding=params_skip_conn[0],
+            params_skip_conn = (1,1) if (downsample == downsample_none) or (downsample == downsample_maxpool) else (1,2)
+            self.skip_conn = nn.Sequential(conv_2d(in_channels,features,kernel_size=3,padding=params_skip_conn[0],
                                                      stride=params_skip_conn[1],bias=True),nn.BatchNorm2d(num_features=features))
         
         self.resblock = resblock   
@@ -203,7 +219,9 @@ class Block(nn.Module):
 
 class UNet(nn.Module):
 
-    def __init__(self, in_channels=3, out_channels=1, init_features=32, block_sizes_down=[1,1,1,1], blocksize_bottleneck=1, block_sizes_up=[1,1,1,1], downsample_method=downsample_maxpool, upsample_method=upsample_conv, resblock=False, squeeze_excite=False, aspp=False, attention=False, bn_relu_at_first=False, bn_relu_at_end=False):
+    def __init__(self, in_channels=3, out_channels=1, init_features=32, block_sizes_down=[1,1,1,1], blocksize_bottleneck=1, block_sizes_up=[1,1,1,1], 
+                 downsample_method=downsample_maxpool, upsample_method=upsample_conv, resblock=False, squeeze_excite=False, aspp=False, attention=False, 
+                 bn_relu_at_first=False, bn_relu_at_end=False):
         
         super(UNet, self).__init__()        
         features = init_features        
@@ -266,7 +284,7 @@ class UNet(nn.Module):
             self.out_aspp = ASPP(features*smaple_factor, features*smaple_factor, downsample_none)
         
         smaple_factor = 1 if upsample_method==upsample_conv else 2
-        self.out_conv = nn.Conv2d(in_channels=features*smaple_factor, out_channels=out_channels, kernel_size=1)
+        self.out_conv = conv_2d(features*smaple_factor, out_channels, 1)
         
         self.aspp = aspp
         self.attention = attention
