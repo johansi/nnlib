@@ -3,6 +3,8 @@ import numpy  as np
 from .image_tools import *
 import pdb
 import time
+import PIL
+import cv2
 from .helper import *
 try:
     import pycuda.autoinit
@@ -15,68 +17,56 @@ except:
     
 try:
     import torch
+    from torchvision import transforms
 except:
     printing("UNALBE TO IMPORT PYTORCH", print_types.WARNING)
     
-
-
-def predict_heatmap_image(runtime,image,size, heatmap_types, normalize_stats, enhance=False):#dist_image,y_pos_dist
-    #i_t1 = time.time()
-    #pdb.set_trace()
+    
+def predict_heatmap_image(runtime, image, size, heatmap_types, normalize_stats, enhance=False):#dist_image,y_pos_dist
     times = {}
+    if type(image) == PIL.Image.Image:
+        image = np.asarray(image)    
     t_resize = time.time()    
     image = cv2.resize(image, (size, size))
-    try:
-        times["resize"] = round((time.time() - t_resize)*1000)
-    except:
-        pdb.set_trace()
-
+    times["resize"] = round((time.time() - t_resize)*1000)
     if enhance:
         t_enhance = time.time() 
         image = image_enhance(image)
         times["enhance"] = round((time.time() - t_enhance)*1000)
-    #i_t2 = time.time()
-    #i_te = round((i_t2 - i_t1)*1000)
-    #y_pos_dist = draw_dist(dist_image,"pred_resize: "+str(i_te)+" ms", y_pos_dist)
 
-    #i_t1 = time.time()
-    t_batch = time.time()
-    batch = batch_and_normalize(image, mean=normalize_stats[0], std=normalize_stats[1])
-    times["batch"] = round((time.time() - t_batch)*1000)
-    #i_t2 = time.time()
-    #i_te = round((i_t2 - i_t1)*1000)
-    #y_pos_dist = draw_dist(dist_image,"pred_batch: "+str(i_te)+" ms", y_pos_dist)
-
-    #i_t1 = time.time()
     t_prediction = time.time()
     prediction = np.squeeze(runtime.inference(batch))
     times["prediction"] = round((time.time() - t_prediction)*1000)
-    #i_t2 = time.time()
-    #i_te = round((i_t2 - i_t1)*1000)
-    #y_pos_dist = draw_dist(dist_image,"pred_predict: "+str(i_te)+" ms", y_pos_dist)
 
-    #i_t1 = time.time()
     t_img_points = time.time()
     img_points = get_image_points(prediction, heatmap_types)
     times["img_points"] = round((time.time() - t_img_points)*1000)
-    #i_t2 = time.time()
-    #i_te = round((i_t2 - i_t1)*1000)
-    #y_pos_dist = draw_dist(dist_image,"pred_image_points: "+str(i_te)+" ms", y_pos_dist)
 
-    #return img_points, image, prediction, y_pos_dist
     return image, prediction, img_points, times
 
 class PYTORCH_CONTEXT:
-    def __init__(self, file):
-        self._file = file
+    def __init__(self, model, state_dict_file, norm_stats_mean, norm_stats_std, device="cpu"):
+        self.model = model
+        self.model.load_state_dict(torch.load(state_dict_file, map_location=torch.device(device))["model"])
+        self.model = self.model.eval()
+        self.normalize = transforms.Normalize(norm_stats_mean,norm_stats_std)
+        self.to_tensor = transforms.ToTensor() 
     
-    def initialize(self):
-        raise("Implement!")
+    def inference(self, inp):
+                
+        if type(inp) == np.ndarray:
+            inp = PIL.Image.fromarray(inp)
+            
+        net_inp = self.normalize(self.to_tensor(inp))[None]
+        with torch.no_grad():
+            out = self.model(net_inp)
+        return np.array(out)
         
 class TENSOR_RT_CONTEXT:
-    def __init__(self, onnxfile, fp16=True, max_workspace_size=3<<28):
-        #pdb.set_trace()
+    def __init__(self, onnxfile,norm_stats_mean, norm_stats_std, fp16=True, max_workspace_size=3<<28):        
         self._fp16 = fp16
+        self.norm_stats_mean = norm_stats_mean
+        self.norm_stats_std = norm_stats_std
         self._max_workspace_size = max_workspace_size
         self.engine_path = onnxfile.parent/(onnxfile.stem+".engine")
         if os.path.exists(self.engine_path):
@@ -100,7 +90,8 @@ class TENSOR_RT_CONTEXT:
         self.context = self.engine.create_execution_context()
         self.bindings = [int(self.d_input), int(self.d_output)]
 
-    def inference(self, input_data):        
+    def inference(self, input_data):
+        input_data = batch_and_normalize(input_data, mean=self.norm_stats_mean, std=self.norm_stats_std)
         np.copyto(self.h_input, input_data.ravel())
         cuda.memcpy_htod_async(self.d_input, self.h_input, self.stream)
         self.context.execute_async(batch_size= 1, bindings=self.bindings, stream_handle=self.stream.handle)
@@ -128,3 +119,4 @@ class TENSOR_RT_CONTEXT:
         self.engine = builder.build_cuda_engine(network)
         with open(self.engine_path, "wb") as f:
             f.write(self.engine.serialize())
+
