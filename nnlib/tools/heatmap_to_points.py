@@ -11,18 +11,26 @@ import numba
 import pdb
 from scipy.interpolate import splprep, splev
 
-def heatmap_to_multiple_points(pred, thres=0.5, max_points=100):    
+def heatmap_to_multiple_points(pred, thres=0.5, max_points=100, cut_off_area=0.5):    
     mask = (pred > thres).astype(np.uint8)
     if int(cv2.__version__[0]) < 4:
         _, contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     else:
         contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
     if (len(contours) == 0) or (len(contours) > max_points):
         return None
-    nut_points = np.zeros((len(contours),2))
+    
+    nut_points = np.zeros((len(contours),3))    
     for i in range(len(contours)):
-        nut_points[i] = np.mean(contours[i][:,0,:], axis=0)
-    return nut_points
+        nut_points[i,0:2] = np.mean(contours[i][:,0,:], axis=0)
+        nut_points[i,2] = cv2.contourArea(contours[i])
+        
+    if len(contours) > 0:        
+        cut_off = nut_points[:,2].mean()*cut_off_area
+        nut_points = nut_points[nut_points[:,2] > cut_off]
+    
+    return nut_points[:,0:2]
 
 def heatmap_to_max_confidence_point(heatmap, thres=0.5):
     center_point = None
