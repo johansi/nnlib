@@ -12,3 +12,11 @@ These are various functions and tools around deep learning with pytorch, tensorr
 - scipy (conda install scipy)
 - matplotlib (conda install matplotlib)
 - ipywidgets (conda install -c anaconda ipywidgets)
+- numpy (conda install numpy)
+- tensorrt (only for tensorrt fast inference)
+- Pillow (conda install -c anaconda pillow)
+- pynvml (conda install -c conda-forge pynvml)
+- scikit-image (conda install -c anaconda scikit-image)
+- snap7 (only for communication with SPS)
+ 
+ conda install -c fastai -c pytorch -c anaconda -c numba -c conda-forge jupyterlab pytorch torchvision opencv fastprogress numba scipy matplotlib ipywidgets numpy pillow pynvml scikit-image ipykernel
