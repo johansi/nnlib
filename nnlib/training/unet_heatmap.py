@@ -29,7 +29,8 @@ import pickle
 import os
 import sys
 
-__all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss_New_exlude_explicit", "HeatLoss_background_verta", "HeatLoss_verta", "HeatLoss_allVertas_verta", "HeatLoss_background_allVertas_verta"]
+__all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss_OldGen_0", "HeatLoss_OldGen_1", "HeatLoss_OldGen_2", "HeatLoss_OldGen_3", "HeatLoss_OldGen_4", "HeatLoss_NextGen_0", "HeatLoss_NextGen_1",
+          "HeatLoss_NextGen_2", "HeatLoss_NextGen_3"]
 
 class UnNormalize(object):
     def __init__(self, mean, std):
@@ -342,7 +343,7 @@ class heatmap_metric(LearnerCallback):
                 
         return metrics
 
-
+'''
 class HeatLoss_New_exlude_explicit_2(nn.Module):
     
     def forward(self, input, target, masks, hull):                 
@@ -430,7 +431,7 @@ class HeatLoss_New_exlude_explicit(nn.Module):
         return (loss_items.sum()+loss_items_other.sum()+loss_hull+loss_backgrond)/((feature_count*2)+2)
         #return (loss_items.sum()+loss_items_other.sum()+loss_backgrond)/((feature_count*2)+1)
 
-
+'''
 class HeatLoss_OldGen_0(nn.Module):
     def __init__(self):
         super().__init__()
@@ -483,8 +484,8 @@ class HeatLoss_OldGen_2(nn.Module):
         return (mean1+mean2)/2
 
 class HeatLoss_OldGen_3(nn.Module):
-    def __init__(self):
-        super().__init__(print_out_losses=False)
+    def __init__(self, print_out_losses=False):
+        super().__init__()
         r"""Class for HeatLoss calculation. This variant includes the masks of following objects:            
             - specific feature
             - all features in a image
@@ -515,8 +516,8 @@ class HeatLoss_OldGen_3(nn.Module):
         return (mean1+mean2)/2
 
 class HeatLoss_OldGen_4(nn.Module):
-    def __init__(self):
-        super().__init__(print_out_losses=False)
+    def __init__(self, print_out_losses=False):
+        super().__init__()
         r"""Class for HeatLoss calculation. This variant includes the masks of following objects:            
             - specific feature
             - all features in a image
@@ -551,8 +552,8 @@ class HeatLoss_OldGen_4(nn.Module):
         return (mean1+mean2+mean3)/3  
 
 class HeatLoss_NextGen_0(nn.Module):
-    def __init__(self):
-        super().__init__(print_out_losses=False)
+    def __init__(self, print_out_losses=False):
+        super().__init__()
         r"""Class for Next Generation HeatLoss calculation. This variant includes offline generated masks of following objects:            
             - specific feature with mask dilation (single loss calculation for every feature)
             - convex hull of all featureswith maks dilation
@@ -613,7 +614,72 @@ class HeatLoss_NextGen_1(nn.Module):
             print(("loss_features {:.4f} loss_hull {:.4f} loss_backgrond {:.4f}").format(loss_features,loss_hull,loss_backgrond), end="\r")               
         
         return (loss_features+loss_hull+loss_backgrond)/3      
+    
+class HeatLoss_NextGen_2(nn.Module):
+    def __init__(self, print_out_losses=False):
+        super().__init__()
+        r"""Class for Next Generation HeatLoss calculation. This variant includes offline generated masks of following objects:            
+            - specific feature with mask dilation (calculation of feature loss all the same)
+            - all features in a image  (calculation of feature loss all the same)    
+            - background (calculation of feature loss all the same)
+        """   
+        self.print_out_losses = print_out_losses
+        
+    def forward(self, input, target, masks, hull):                
+                
+        all_mask = torch.any(masks,dim=1)[:,None].repeat(1,target.shape[1],1,1)        
+        mask_not = torch.logical_not(masks)        
+        
+        loss_features = torch.mean(torch.abs(input[masks] - target[masks]))
+        loss_all_features = torch.mean(torch.abs(input[all_mask] - target[all_mask]))        
+        loss_backgrond = torch.mean(torch.abs(input[mask_not] - target[mask_not]))        
+        
+        if self.print_out_losses:
+            print(("loss_features {:.4f} loss_all_features {:.4f} loss_backgrond {:.4f}").format(loss_features.item(),loss_all_features.item(),loss_backgrond.item()), end="\r")               
+        
+        return (loss_features+loss_all_features+loss_backgrond)/3
 
+    
+class HeatLoss_NextGen_3(nn.Module):
+    def __init__(self, print_out_losses=False):
+        super().__init__()
+        r"""Class for Next Generation HeatLoss calculation. This variant includes offline generated masks of following objects:            
+            - specific feature with mask dilation (single loss calculation for every feature)
+            - all features in a image   (single loss calculation for every feature) 
+            - background (single loss calculation for every feature)
+        """   
+        self.print_out_losses = print_out_losses
+        
+    def forward(self, input, target, masks, hull):                
+                
+        feature_count = target.shape[1]
+        mask_not = torch.logical_not(masks)
+        all_mask = torch.any(masks,dim=1)[:,None].repeat(1,target.shape[1],1,1)
+        
+        loss_features = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        loss_backgrond = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        loss_all_features = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
+        
+        for idx in range(feature_count):
+            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
+            diff_not = torch.abs(input[:,idx,:,:][mask_not[:,idx,:,:]] - target[:,idx,:,:][mask_not[:,idx,:,:]])
+            diff_all = torch.abs(input[:,idx,:,:][all_mask[:,idx,:,:]] - target[:,idx,:,:][all_mask[:,idx,:,:]])
+            if len(diff) > 0:
+                loss_features[idx] = torch.mean(diff)
+            if len(diff_not) > 0:
+                loss_backgrond[idx] = torch.mean(diff_not)
+            if len(diff_all) > 0:
+                loss_all_features[idx] = torch.mean(diff_all)
+            
+        loss_features = torch.mean(loss_features)
+        loss_backgrond = torch.mean(loss_backgrond)
+        loss_all_features = torch.mean(loss_all_features)
+        
+        if self.print_out_losses:
+            print(("loss_features {:.4f} loss_all_features {:.4f} loss_backgrond {:.4f}").format(loss_features.item(),loss_all_features.item(),loss_backgrond.item()), end="\r")                          
+        
+        return (loss_features+loss_all_features+loss_backgrond)/3    
+    
 class HeatmapLearner:
     def __init__(self, features, root_path, images_path, hull_path, size=(512,512), bs=-1, items_count=-1, gpu_id=0, 
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
@@ -667,9 +733,9 @@ class HeatmapLearner:
         if sample_img is None:
             t_img_files = glob.glob(str(self.__root_path/self.__images_path/"*"))
             idx = random.randint(0, len(t_img_files)-1)
-            self.__sample_img = self.__root_path/self.__images_path/Path(t_img_files[idx]).name            
+            self.__sample_img = self.__root_path/self.__images_path/Path(t_img_files[idx]).name
         else:
-            self.__sample_img = self.__root_path/self.__images_path/sample_img        
+            self.__sample_img = self.__root_path/self.__images_path/sample_img
         
         true_positive_threshold = round(true_positive_threshold*self.__size[0])        
         
@@ -681,6 +747,7 @@ class HeatmapLearner:
         
         file_filters_include = np.array(file_filters_include) if file_filters_include is not None else None
         file_filters_exclude = np.array(file_filters_exclude) if file_filters_exclude is not None else None
+        
         
         self.__create_learner(file_filters_include=file_filters_include, file_filters_exclude=file_filters_exclude, valid_images_store=valid_images_store, items_count=items_count,
                               features=features, bs=bs, data_aug=data_aug,image_convert_mode=image_convert_mode, 
@@ -703,17 +770,18 @@ class HeatmapLearner:
         for feat in features.keys():
                 heatmap_files_sample.append(self.__root_path/feat/self.__sample_img.name)                                        
         
-        self.sample_dataset = CustomHeatmapDataset(data=np.array([[self.__sample_img,heatmap_files_sample]]), hull_path=self.__hull_path, grayscale=image_convert_mode == "L", 
+        self.sample_dataset = CustomHeatmapDataset(data=[[self.__sample_img,heatmap_files_sample]], hull_path=self.__hull_path, grayscale=image_convert_mode == "L", 
                                                   normalize_mean=norm_stats[0],normalize_std=norm_stats[1], is_valid=True, 
-                                                  clahe=clahe) 
+                                                  clahe=clahe, size=self.__size) 
         
         self.train_dataset = CustomHeatmapDataset(data=training_data, hull_path=self.__hull_path, grayscale=image_convert_mode == "L", 
-                                                  normalize_mean=norm_stats[0],normalize_std=norm_stats[1], data_aug=data_aug, clahe=clahe)
+                                                  normalize_mean=norm_stats[0],normalize_std=norm_stats[1], data_aug=data_aug, clahe=clahe,
+                                                  size=self.__size)
 
         self.valid_dataset = CustomHeatmapDataset(data=valid_data, hull_path=self.__hull_path, grayscale=image_convert_mode == "L",
-                                                  normalize_mean=norm_stats[0],normalize_std=norm_stats[1], is_valid=True, clahe=clahe)                                
-
-
+                                                  normalize_mean=norm_stats[0],normalize_std=norm_stats[1], is_valid=True, clahe=clahe,
+                                                  size=self.__size)                                
+        
         sample_img = None
         if self.__sample_img is not None:
             to_t = transforms.ToTensor()
@@ -726,26 +794,23 @@ class HeatmapLearner:
             sample_img = (img,masks)
 
         metric = None if disable_metrics else heatmap_metric(features = features, true_positive_threshold = true_positive_threshold, metric_counter = metric_counter)
-        
         net = self.__get_net(ntype, unet_init_features).to(torch.device("cuda:"+str(self.__gpu_id)))
-        opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay)
-        
+        opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)        
         loss_func = HeatLoss_NextGen_1() if loss_func is None else loss_func       
-        loss_func = loss_func.to(torch.device("cuda:"+str(self.__gpu_id)))
-        
+        loss_func = loss_func.to(torch.device("cuda:"+str(self.__gpu_id)))                
         if bs == -1:      
             
             batch_estimator = Batch_Size_Estimator(net=net, opt=opt,
                                                    loss_func=loss_func, 
                                                    gpu_id=self.__gpu_id, dataset = self.train_dataset)
             bs = batch_estimator.find_max_bs()
-                                 
+                                         
         train_dl = DataLoader(self.train_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)
         valid_dl = DataLoader(self.valid_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)                                                       
-
+        
         self.learner = Learner(model=net,loss_func=loss_func, train_dl=train_dl, valid_dl=valid_dl,
                                optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id,
-                               predict_smaple_func=self.predict_sample)                 
+                               predict_smaple_func=self.predict_sample)                         
            
     def __get_net(self, ntype, unet_init_features):
         if ntype == "res_unet++":
@@ -932,7 +997,7 @@ class HeatmapLearner:
         
         filename = "model" if filename is None else filename 
         
-        checkpoint = torch.load(self.__root_path/"models"/(filename+".pth"))
+        checkpoint = torch.load(self.__root_path/"models"/(self.__file_prefix+filename+".pth"))
         self.learner.model.load_state_dict(checkpoint['model'])
         self.learner.optimizer.load_state_dict(checkpoint['optimizer'])                                
         self.__epochs = checkpoint["epochs"]
@@ -957,7 +1022,7 @@ class HeatmapLearner:
         
         input_names = [ "actual_input_1" ] + [ "learned_%d" % i for i in range(16) ]
         output_names = [ "output1" ]
-        
+        #pdb.set_trace()
         onnx_export = (self.__root_path/"onnx_export")
         onnx_export.mkdir(parents=True, exist_ok=True)
         
@@ -965,7 +1030,7 @@ class HeatmapLearner:
                            requires_grad=True, device="cuda:"+str(self.__gpu_id))
         
         for i in range(batch_size):
-            batch[i] = self.valid_dataset[i][0]
+            batch[i] = self.valid_dataset[i][1]
                     
         filename = "export" if filename is None else filename 
                 
@@ -1036,10 +1101,12 @@ class HeatmapLearner:
                     raise("The Heatmaptype " + type_of + " is not implemented yet.")            
         
         dataset = self.train_dataset if train else self.valid_dataset
-        #
+        
         train_dataloader = DataLoader(dataset, batch_size=count_img, shuffle=True, num_workers=num_workers())
         data_iter = iter(train_dataloader)
-        names, images, labels, masks, hulls = next(data_iter)    
+        names, images, labels, masks, hulls = next(data_iter)
+        for idx in range(len(images)):
+            images[idx] = dataset.un_normalize(images[idx])
         nrows = ceil(count_img/3)
         f,axes = plt.subplots(nrows=nrows,ncols=3,figsize=(15,5*nrows))
         axes = axes.flatten()[:count_img]
