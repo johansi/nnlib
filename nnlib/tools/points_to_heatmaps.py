@@ -13,25 +13,32 @@ import multiprocessing
 import time
 import pdb
 from .helper import get_labels, replace_values
+from fastprogress.fastprogress import progress_bar
+from skimage.morphology.convex_hull import convex_hull_image
 
 class LABELS_TO_HEATMAPS_COMVERTER:
     
-    def __init__(self, params):
-        self.__root_path=params["root_path"]
-        self.__img_path=params["img_path"]
-        self.__final_images_path=params["final_images_path"]
-        self.__painted_images_path=params["painted_images_path"]
-        self.__replacements = params["replacements"]
-        self.__json_path=params["json_path"]
-        self.__features=params["features"]
-        self.__image_ext=params["image_ext"]
-        self.__target_size=params["target_size"]        
-        self.__scales = params["scales"]
-        self.__crop_margin=params["crop_margin"]
-        self.__file_name_function = params["file_name_function"]
-     
+    def __init__(self, root_path, img_path, json_path, features, target_size=512, image_ext="png", 
+                 scales=[0.0],crop_margin=0, file_name_function=None, final_images_path="final_images", 
+                 painted_images_path="painted_images", convex_hull_features=[],hull_path="hull",
+                 replacements=None, process_output_image=None):
+        self.__root_path=root_path
+        self.__convex_hull_features = convex_hull_features
+        self.__img_path=img_path
+        self.__hull_path = hull_path
+        self.__json_path=json_path
+        self.__features=features            
+        self.__final_images_path=final_images_path
+        self.__painted_images_path=painted_images_path        
+        self.__replacements = replacements
+        self.__image_ext=image_ext
+        self.__target_size=target_size
+        self.__scales = scales
+        self.__crop_margin=crop_margin
+        self.__process_output_image = process_output_image
+        self.__file_name_function = file_name_function if file_name_function is not None else lambda label, image_ext: label["Labeled Data"]+ "."+ image_ext 
     def process(self):
-        labels = json.load(open(self.__json_path,"r"))
+        labels = json.load(open(self.__root_path/self.__json_path,"r"))
         self.manage_folders()
         replace_values(labels, self.__replacements)
         self.new_process(labels)
@@ -85,16 +92,19 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                 shutil.rmtree(self.__root_path/self.__painted_images_path)
                 sleep(0.1)
             os.mkdir(self.__root_path/self.__painted_images_path)
-
+        
+        if os.path.exists(self.__root_path/self.__hull_path):
+            shutil.rmtree(self.__root_path/self.__hull_path)
+            sleep(0.1)
+        os.mkdir(self.__root_path/self.__hull_path)                    
+        
         for key in self.__features.keys():        
             if os.path.exists(self.__root_path/key):
                 shutil.rmtree(self.__root_path/key)
                 sleep(0.1)
             os.mkdir(self.__root_path/key)
 
-
-
-
+            
     def get_all_points(self,all_pts):
         all_points = np.array([[0,0]])
         for key in all_pts.keys():
@@ -381,17 +391,22 @@ class LABELS_TO_HEATMAPS_COMVERTER:
 
         return np.round(np.interp(heatmap, (heatmap.min(), heatmap.max()), (0, 255))).astype(np.uint8)   
 
-    def write_image(self,img,path,file, is_mask=False):
-        if not is_mask:
+    
+    
+    def write_image(self,img,path,file, is_gray=False):
+        if not is_gray:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         return cv2.imwrite(str(path/file), img)
 
 
-
     def new_process(self,labels):    
+        dilate_kernel = np.ones((5,5),np.uint8)
         count = len(labels)
-        for idx,label in enumerate(labels):
+        pbar = progress_bar(range(len(labels)))
+        for idx in pbar:
+            label = labels[idx]
             # get labels
+            
             label_data,label_types, heat_radiuses = get_labels(label, self.__features)
 
             # get file name TODO: set file name to extern function
@@ -400,8 +415,17 @@ class LABELS_TO_HEATMAPS_COMVERTER:
             #if file == "2020-11-11_15-44-39.584.png":
                 #pdb.set_trace()
 
-            # load image and convert to rgb
-            img = cv2.cvtColor(cv2.imread(str(self.__root_path/self.__img_path/file)),cv2.COLOR_BGR2RGB)
+            # load image and convert to rgb 
+            
+            filen = self.__root_path/self.__img_path/file
+            
+            if not filen.exists():
+                continue
+            
+            #pdb.set_trace()
+            img = cv2.imread(str(filen))
+            
+            img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
             
             for scale in self.__scales:
                 sized_image_file = file[:file.find("."+self.__image_ext)]+"_sized_"+str(scale)+".png"
@@ -416,9 +440,12 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                 sized_label_data,img_sized = self.size_image(squared_label_data, img_squared)
 
                 # make heatmaps
+                heatmaps = []
                 for asset_key in sized_label_data.keys():
                     points = sized_label_data[asset_key]
                     
+                    #if (filen.stem == "10IF56K7_top") and (asset_key == "T11"):
+                        #pdb.set_trace()
                     if len(points) > 0:                        
                         if (label_types[asset_key] == "polygon"):
                             heatmap = self.make_polygonal_heatmap(points,True, heat_radiuses[asset_key])
@@ -430,8 +457,38 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                             raise("label_type `"+label_types[asset_key]+"` not implemented yet.")
                     else:
                         heatmap = np.zeros((self.__target_size,self.__target_size), dtype=np.uint8)
+                        
+                    if heatmap.min() == 255:
+                        heatmap = np.zeros((self.__target_size,self.__target_size), dtype=np.uint8)                        
 
-                    self.write_image(heatmap,self.__root_path/asset_key, sized_image_file, is_mask=True)
+                    self.write_image(heatmap,self.__root_path/asset_key, sized_image_file, is_gray=True)
+                    
+                    # make mask
+                    mask = heatmap>0
+                    if mask.max() == False:
+                        interpolated = np.zeros((mask.shape[0],mask.shape[1]), dtype=np.uint8)
+                    else:
+                        dilated = cv2.dilate(mask.astype(np.uint8),dilate_kernel,iterations = 2)                        
+                        interpolated = np.round(np.interp(dilated, (dilated.min(), dilated.max()), (0, 255))).astype(np.uint8)
+                        
+                    self.write_image(interpolated,self.__root_path/asset_key, Path(sized_image_file).stem + "_mask.png", is_gray=True)                                        
+                    
+                    if asset_key in self.__convex_hull_features:
+                        heatmaps.append(heatmap)
+                
+                # make convex hull
+                if len(heatmaps) > 0:
+                    #if filen.stem == "10IF56K7_top":
+                        #pdb.set_trace()
+
+                    combined_mask = np.logical_or.reduce(np.stack(heatmaps))
+                    if combined_mask.max() == False:                        
+                        interpolated = np.zeros((combined_mask.shape[0],combined_mask.shape[1]), dtype=np.uint8)
+                    else:                        
+                        hull = convex_hull_image(combined_mask)                    
+                        dilated = cv2.dilate(hull.astype(np.uint8),dilate_kernel,iterations = 3)
+                        interpolated = np.round(np.interp(dilated, (dilated.min(), dilated.max()), (0, 255))).astype(np.uint8)
+                    self.write_image(interpolated,self.__root_path/self.__hull_path, sized_image_file, is_gray=True)
 
                 # paint images            
                 if self.__painted_images_path is not None:
@@ -441,11 +498,17 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                         for pt in points:                    
                             img_sized_paint = cv2.circle(img_sized_paint, tuple(pt),1,(255,0,0),2)
 
-                    self.write_image(img_sized_paint,self.__root_path/self.__painted_images_path, sized_image_file, is_mask=False)            
+                    self.write_image(img_sized_paint,self.__root_path/self.__painted_images_path, sized_image_file, is_gray=False)            
 
                 # save final image
-                self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_mask=False)            
+                if self.__process_output_image is not None:
+                    img_sized = self.__process_output_image(img_sized, sized_image_file)
+                    self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=True)
+                else:
+                    self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=False)
+                                    
 
-                print("saved heatmaps and final image", idx+1,"from", count, sized_image_file,  end="\r")
+                pbar.comment = sized_image_file
+                #print("saved heatmaps and final image", idx+1,"from", count, sized_image_file,  end="\r")
 
 
