@@ -3,6 +3,7 @@ from fastprogress.fastprogress import master_bar, progress_bar
 import numpy as np
 from time import time
 from time import strftime, gmtime
+import pdb
 
 __all__ = ["LearnerCallback", "Learner"]
 
@@ -32,19 +33,20 @@ class LearnerCallback():
 
 class Learner:
     
-    def __init__(self, model, loss_func, train_dl, valid_dl, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None):        
+    def __init__(self, model, loss_func, train_dl, valid_dl, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None, masks_and_hulls=True):        
         self.device = torch.device("cuda:"+str(gpu_id))
-        self.predict_smaple_func = predict_smaple_func if predict_smaple_func is not None else lambda : None        
+        self.predict_smaple_func = predict_smaple_func if predict_smaple_func is not None else lambda epoch : None        
         self.model = model
         self.train_dl = train_dl
         self.valid_dl = valid_dl        
         self.optimizer = optimizer
         self.loss_func = loss_func
-        self.learner_callback = learner_callback if learner_callback is not None else LearnerCallback()
+        self.learner_callback = learner_callback if learner_callback is not None else LearnerCallback()        
         self.metric_names = self.learner_callback.get_metric_names()
         self.metrics = None
         self.train_losses = None
         self.valid_losses = None
+        self.masks_and_hulls = masks_and_hulls
                             
     def set_loss_func(self, loss_func):
         self.loss_func = loss_func
@@ -54,8 +56,13 @@ class Learner:
         
         self.learner_callback.on_batch_begin(x_data, y_data, train=is_train)
         self.optimizer.zero_grad()        
-        out = self.model(x_data)                
-        loss = self.loss_func(out, y_data, masks, hulls)
+        out = self.model(x_data)
+        
+        if self.masks_and_hulls:
+            loss = self.loss_func(out, y_data, masks, hulls)
+        else:
+            loss = self.loss_func(out, y_data)
+            
         if is_train:
             loss.backward()
             self.optimizer.step()
@@ -71,11 +78,17 @@ class Learner:
         with torch.no_grad():
             val_losses = []
             
-            for names,x_data,y_data, masks, hulls in progress_bar(self.valid_dl, parent=parrent_bar):                
+            for data_zip in progress_bar(self.valid_dl, parent=parrent_bar):                
+                
+                if self.masks_and_hulls:
+                    names,x_data,y_data, masks, hulls = (data_zip[0],data_zip[1],data_zip[2],data_zip[3],data_zip[4])
+                    masks = masks.to(self.device)
+                    hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)
+                else:
+                    names,x_data,y_data,masks,hulls = (data_zip[0],data_zip[1],data_zip[2],None,None)
+                                    
                 x_data = x_data.to(self.device)
                 y_data = y_data.to(self.device)
-                masks = masks.to(self.device)
-                hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)
                 val_loss = self.loss_batch(x_data, y_data, masks, hulls, is_train=False)
                 parrent_bar.child.comment = str(round(val_loss,4))
                 val_losses.append(val_loss)
@@ -118,12 +131,20 @@ class Learner:
             self.model.train()
             self.learner_callback.on_epoch_begin()
             
-            for names,x_data,y_data, masks, hulls in progress_bar(self.train_dl, parent=pbar):                
+            for data_zip in progress_bar(self.train_dl, parent=pbar):                
+                
+                if self.masks_and_hulls:
+                    names,x_data,y_data, masks, hulls = (data_zip[0],data_zip[1],data_zip[2],data_zip[3],data_zip[4])
+                    masks = masks.to(self.device)
+                    hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)                     
+                else:
+                    names,x_data,y_data,masks,hulls = (data_zip[0],data_zip[1],data_zip[2],None,None)
+                    
                 x_data = x_data.to(self.device)
-                y_data = y_data.to(self.device)
-                masks = masks.to(self.device)
-                hulls = hulls[:,None].repeat(1,masks.shape[1],1,1).to(self.device)                
+                y_data = y_data.to(self.device)                                
+                
                 train_loss = self.loss_batch(x_data, y_data, masks, hulls, scheduler=scheduler, is_train=True)                
+                    
                 pbar.child.comment = str(round(train_loss,4))
                                             
             valid_loss = self.validate(parrent_bar=pbar)
