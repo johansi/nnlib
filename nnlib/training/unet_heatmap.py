@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import pickle
 import os
 import sys
+import warnings
 
 __all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss_OldGen_0", "HeatLoss_OldGen_1", "HeatLoss_OldGen_2", "HeatLoss_OldGen_3", "HeatLoss_OldGen_4", "HeatLoss_NextGen_0", "HeatLoss_NextGen_1",
           "HeatLoss_NextGen_2", "HeatLoss_NextGen_3"]
@@ -100,7 +101,9 @@ class CustomHeatmapDataset(Dataset):
         img = self.clahe.apply(img)
         return Image.fromarray(img)                
     
-    def __getitem__(self, idx):          
+    def __getitem__(self, idx):
+        
+        
         
         image = load_image(self.data[idx][0], size=self.size, convert_mode=self.convert_mode, to_numpy=False)        
                 
@@ -131,48 +134,61 @@ class CustomHeatmapDataset(Dataset):
         
 class RandomRotationImageTarget(transforms.RandomRotation):
     def __call__(self, img, targets, hull):    
+        
+        
         angle = self.get_params(self.degrees)
         img = transforms.functional.rotate(img, angle, self.resample, self.expand, self.center)
         hull = transforms.functional.rotate(hull, angle, self.resample, self.expand, self.center)
         for idx in range(len(targets)):
             targets[idx][0] = transforms.functional.rotate(targets[idx][0], angle, self.resample, self.expand, self.center)
             targets[idx][1] = transforms.functional.rotate(targets[idx][1], angle, self.resample, self.expand, self.center)
+        
         return img, targets, hull
     
 class RandomHorizontalFlipImageTarget(transforms.RandomHorizontalFlip):
-    def __call__(self, img, targets, hull):    
+    def __call__(self, img, targets, hull):   
+        
+        
         if random.random() < self.p:
             img = transforms.functional.hflip(img)
             hull = transforms.functional.hflip(hull)
             for idx in range(len(targets)):
                 targets[idx][0] = transforms.functional.hflip(targets[idx][0])
                 targets[idx][1] = transforms.functional.hflip(targets[idx][1])
+        
         return img,targets,hull
 
 class RandomVerticalFlipImageTarget(transforms.RandomVerticalFlip):
     def __call__(self, img, targets, hull):    
+        
+        
         if random.random() < self.p:
             img = transforms.functional.vflip(img)
             hull = transforms.functional.vflip(hull)
             for idx in range(len(targets)):
                 targets[idx][0] = transforms.functional.vflip(targets[idx][0])
                 targets[idx][1] = transforms.functional.vflip(targets[idx][1])
+        
         return img,targets,hull
 
 class RandomPerspectiveImageTarget(transforms.RandomPerspective):
     def __call__(self, img, targets, hull): 
+        
+        
         if not transforms.functional._is_pil_image(img):
             raise TypeError('img should be PIL Image. Got {}'.format(type(img)))
-
+        
         if random.random() < self.p:
-            width, height = img.size
-            startpoints, endpoints = self.get_params(width, height, self.distortion_scale)
-            img = transforms.functional.perspective(img, startpoints, endpoints, self.interpolation)
-            hull = transforms.functional.perspective(hull, startpoints, endpoints, self.interpolation)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="torch.lstsq")            
+                width, height = img.size
+                startpoints, endpoints = self.get_params(width, height, self.distortion_scale)
+                img = transforms.functional.perspective(img, startpoints, endpoints, self.interpolation, self.fill)
+                hull = transforms.functional.perspective(hull, startpoints, endpoints, self.interpolation, self.fill)
 
-            for idx in range(len(targets)):
-                targets[idx][0] = transforms.functional.perspective(targets[idx][0], startpoints, endpoints, self.interpolation)
-                targets[idx][1] = transforms.functional.perspective(targets[idx][1], startpoints, endpoints, self.interpolation)
+                for idx in range(len(targets)):
+                    targets[idx][0] = transforms.functional.perspective(targets[idx][0], startpoints, endpoints, self.interpolation, self.fill)
+                    targets[idx][1] = transforms.functional.perspective(targets[idx][1], startpoints, endpoints, self.interpolation, self.fill)
 
         return img,targets,hull
 
@@ -185,8 +201,9 @@ class ComposeImageTarget(transforms.Compose):
         
 class DataAugmentation:
     "DataAugmentation class with `size(height,width)`"
-    def __init__(self, rotation=10,horizontal_flip=0.5,
-                 vertical_flip=0.5,warp=0.1, zoom=0.8, brightness=0.5, contrast=0.5, GaussianBlur=1):
+    def __init__(self, rotation=10,horizontal_flip_p=0.5,
+                 vertical_flip_p=0.5,warp=0.1,warp_p=0.5, zoom=0.8, 
+                 brightness=0.5, contrast=0.5, GaussianBlur=1):
                  
         
         self.lightning_transforms = transforms.Compose([transforms.ColorJitter(brightness=brightness,contrast=contrast),
@@ -194,20 +211,25 @@ class DataAugmentation:
                                                        ])
 
         self.affine_transforms = ComposeImageTarget([                                                     
-                                                     RandomRotationImageTarget((-rotation,rotation)),
-                                                     RandomHorizontalFlipImageTarget(horizontal_flip),
-                                                     RandomVerticalFlipImageTarget(vertical_flip),
-                                                     RandomPerspectiveImageTarget(distortion_scale=warp),
+                                                     RandomRotationImageTarget(degrees=(-rotation,rotation)),
+                                                     RandomHorizontalFlipImageTarget(p=horizontal_flip_p),
+                                                     RandomVerticalFlipImageTarget(p=vertical_flip_p),
+                                                     RandomPerspectiveImageTarget(distortion_scale=warp, p=warp_p),
                                                      #transforms.RandomResizedCrop(size=size,scale=(zoom,1.0),ratio=(1.0,1.0))
                                                     ])        
         
     def transform(self,features,labels, hull):
                 
+        
         #do lighting transforms for features
         features = self.lightning_transforms(features)
         
+        
+        
         #do affine transforms for features and labels        
         features,labels,hull = self.affine_transforms(features, labels, hull)            
+        
+        
         
         return features,labels,hull     
     
@@ -343,95 +365,6 @@ class heatmap_metric(LearnerCallback):
                 
         return metrics
 
-'''
-class HeatLoss_New_exlude_explicit_2(nn.Module):
-    
-    def forward(self, input, target, masks, hull):                 
-        
-        #hull_not = torch.logical_not(hull)
-        feature_count = target.shape[1]
-        loss_items = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
-        loss_items_union = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
-        mask_union = torch.any(masks, axis=1)
-        mask_background = torch.logical_not(mask_union)[:,None].repeat(1,feature_count,1,1)      
-        for idx in range(feature_count):
-            #mask_other = torch.ones(feature_count, dtype=torch.bool, device=input.device)
-            #mask_other[idx] = False
-            
-            diff_other = torch.abs(input[:,idx,:,:][mask_union] - target[:,idx,:,:][mask_union])                        
-            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
-            if len(diff) > 0:
-                loss_items[idx] = torch.mean(diff)
-            if len(diff_other) > 0:
-                loss_items_union[idx] = torch.mean(diff_other)
-
-        #loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
-        loss_backgrond = torch.mean(torch.abs(input[mask_background] - target[mask_background]))
-        
-        # print loss begin
-        out_str = ""
-        print_items_loss = []
-        
-        for idx in range(len(loss_items)):
-            out_str = out_str + "loss_item_"+str(idx) + " {:.4f} " + "loss_item_union_"+str(idx) + " {:.4f} "
-            print_items_loss.append(round(loss_items[idx].item(),4))
-            print_items_loss.append(round(loss_items_union[idx].item(),4))
-            
-            
-        #print_items_loss.append(round(loss_hull.item(),4))
-        print_items_loss.append(round(loss_backgrond.item(),4))
-        #print((out_str+" loss_hull {:.4f} loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
-        print((out_str+" loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
-        # print loss end        
-        
-        #return (loss_items.sum()+loss_items_union.sum()+loss_hull+loss_backgrond)/((feature_count*2)+2)
-        return (loss_items.sum()+loss_items_union.sum()+loss_backgrond)/((feature_count*2)+1)
-        #return (loss_items.sum()+loss_items_other.sum()+loss_backgrond)/((feature_count*2)+1)
-
-
-class HeatLoss_New_exlude_explicit(nn.Module):
-    
-    def forward(self, input, target, masks, hull): 
-        
-        hull_not = torch.logical_not(hull)
-        feature_count = target.shape[1]
-        loss_items = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
-        loss_items_other = torch.zeros(feature_count, dtype=torch.float32, device=input.device)
-        for idx in range(feature_count):
-            mask_other = torch.ones(feature_count, dtype=torch.bool, device=input.device)
-            mask_other[idx] = False
-            mask_other = torch.any(masks[:,mask_other,:,:], axis=1)
-            diff_other = torch.abs(input[:,idx,:,:][mask_other] - target[:,idx,:,:][mask_other])                        
-            diff = torch.abs(input[:,idx,:,:][masks[:,idx,:,:]] - target[:,idx,:,:][masks[:,idx,:,:]])
-            if len(diff) > 0:
-                loss_items[idx] = torch.mean(diff)
-            if len(diff_other) > 0:
-                loss_items_other[idx] = torch.mean(diff_other)
-
-                
-        loss_hull = torch.mean(torch.abs(input[hull] - target[hull]))        
-        loss_backgrond = torch.mean(torch.abs(input[hull_not] - target[hull_not]))
-        
-        # print loss begin
-        out_str = ""
-        print_items_loss = []
-        
-        for idx in range(len(loss_items)):
-            out_str = out_str + "loss_item_"+str(idx) + " {:.4f} " + "loss_item_other_"+str(idx) + " {:.4f} "
-            print_items_loss.append(round(loss_items[idx].item(),4))
-            print_items_loss.append(round(loss_items_other[idx].item(),4))
-            
-            
-        print_items_loss.append(round(loss_hull.item(),4))
-        print_items_loss.append(round(loss_backgrond.item(),4))
-        print((out_str+" loss_hull {:.4f} loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
-        #print((out_str+" loss_backgrond {:.4f}").format(*print_items_loss), end="\r")
-        # print loss end
-        
-        return (loss_items.sum()+loss_items_other.sum()+loss_hull+loss_backgrond)/((feature_count*2)+2)
-        #return (loss_items.sum()+loss_items_other.sum()+loss_backgrond)/((feature_count*2)+1)
-
-'''
 class HeatLoss_OldGen_0(nn.Module):
     def __init__(self):
         super().__init__()
@@ -685,7 +618,7 @@ class HeatmapLearner:
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
                  unet_init_features=16, valid_images_store="valid_images.npy", image_convert_mode="L", metric_counter=1, 
                  sample_img=None, true_positive_threshold=0.02, ntype="unet", lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False,
-                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0):
+                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, num_load_workers=None):
         
         r"""Class for train an Unet-style Neural Network, for heatmap based image recognition
 
@@ -705,8 +638,7 @@ class HeatmapLearner:
             file_filters_exclude :  exclude file filter in images_path, must be a list with exclude search strings
         Example:
 
-        """        
-        
+        """                
         # check assertions
         assert power_of_2(size), "size must be a power of 2, to work with this class"
         
@@ -717,6 +649,7 @@ class HeatmapLearner:
                             
         self.features = features
         self.__size = size
+        self.__num_load_workers = num_load_workers
         self.__root_path = Path(root_path)
         self.__images_path = Path(images_path)
         self.__hull_path = self.__root_path/Path(hull_path)
@@ -805,8 +738,8 @@ class HeatmapLearner:
                                                    gpu_id=self.__gpu_id, dataset = self.train_dataset)
             bs = batch_estimator.find_max_bs()
                                          
-        train_dl = DataLoader(self.train_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)
-        valid_dl = DataLoader(self.valid_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)                                                       
+        train_dl = DataLoader(self.train_dataset, batch_size=bs, shuffle=True, num_workers=num_workers() if self.__num_load_workers is None else self.__num_load_workers, pin_memory=False)
+        valid_dl = DataLoader(self.valid_dataset, batch_size=bs, shuffle=True, num_workers=num_workers() if self.__num_load_workers is None else self.__num_load_workers, pin_memory=False)
         
         self.learner = Learner(model=net,loss_func=loss_func, train_dl=train_dl, valid_dl=valid_dl,
                                optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id,
@@ -866,7 +799,7 @@ class HeatmapLearner:
                 new_filenames = []
                 for filename in all_image_files:
                     for ffilter in file_filters_include:
-                        if filename.name.find((ffilter)) != -1:
+                        if filename.find((ffilter)) != -1:
                             new_filenames.append(filename)
                             break
                 all_image_files = np.array(new_filenames) 
@@ -877,7 +810,7 @@ class HeatmapLearner:
                     include_in = True
                     
                     for ffilter in file_filters_exclude:
-                        if filename.name.find((ffilter)) != -1:
+                        if filename.find((ffilter)) != -1:
                             include_in = False                            
                             break
                     
@@ -887,9 +820,8 @@ class HeatmapLearner:
                 all_image_files = np.array(new_filenames) 
                 
             return all_image_files
-
-
-        all_image_files = list((self.__root_path/self.__images_path).glob("*.png"))
+        
+        all_image_files = [fname.name for fname in list((self.__root_path/self.__images_path).glob("*.png"))]
         all_image_files = all_image_files if items_count == -1 else all_image_files[:items_count] 
         
         all_image_files = filter_files(all_image_files)
@@ -904,12 +836,13 @@ class HeatmapLearner:
             img_file = all_image_files[idx]              
             heatmap_files = []
             for feat in features.keys():
-                heatmap_files.append(self.__root_path/feat/img_file.name)                                        
+                heatmap_files.append(self.__root_path/feat/img_file)                                                                
             
+            add_file = self.__root_path/self.__images_path/img_file
             if img_file in valid_images_files:                
-                valid_data.append((img_file,heatmap_files))
+                valid_data.append((add_file,heatmap_files))
             else:
-                training_data.append((img_file,heatmap_files))        
+                training_data.append((add_file,heatmap_files))        
 
         return training_data, valid_data  
 
@@ -1102,7 +1035,7 @@ class HeatmapLearner:
         
         dataset = self.train_dataset if train else self.valid_dataset
         
-        train_dataloader = DataLoader(dataset, batch_size=count_img, shuffle=True, num_workers=num_workers())
+        train_dataloader = DataLoader(dataset, batch_size=count_img, shuffle=True, num_workers=num_workers() if self.__num_load_workers is None else self.__num_load_workers)
         data_iter = iter(train_dataloader)
         names, images, labels, masks, hulls = next(data_iter)
         for idx in range(len(images)):
