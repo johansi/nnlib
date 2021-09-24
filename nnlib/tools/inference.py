@@ -22,7 +22,7 @@ except:
     printing("UNALBE TO IMPORT PYTORCH", print_types.WARNING)
     
     
-def predict_heatmap_image(runtime, image, size, heatmap_types, normalize_stats, enhance=False):#dist_image,y_pos_dist
+def predict_heatmap_image(runtime, image, size, heatmap_types, enhance=False):#dist_image,y_pos_dist
     times = {}
     if type(image) == PIL.Image.Image:
         image = np.asarray(image)    
