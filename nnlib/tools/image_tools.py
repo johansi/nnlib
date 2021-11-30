@@ -66,8 +66,15 @@ def batch_and_normalize(img, mean=None, std=None):
     if std is None:
         std = gray_norm_stats[1] if len(img.shape) == 2 else rgb_norm_stats[1]
 
-    data = ((img/255)-mean) / std
-    data = data if len(data.shape) == 3 else data[None]
+    img = img.astype(np.float32)
+    img = img/255.0
+    data = ((img)-mean)/std
+    
+    if len(data.shape) == 3:
+        data = np.moveaxis(data,2,0)
+    else:
+        data = data[None]
+    
     return data[None]
 
 def show_image_cv(image, window):
