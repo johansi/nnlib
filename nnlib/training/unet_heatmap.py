@@ -1,6 +1,6 @@
 
 import numpy as np
-#from .unet import UNet
+from .unet import UNet
 from pathlib import Path
 from random import sample
 import pdb
@@ -13,7 +13,7 @@ from ..tools.heatmap_to_points import *
 from ..tools.helper import *
 from ..tools.image_tools import *
 from .basic import *
-from .unet import *
+from .unet_revised import SE_Res_UNet
 from PIL import Image
 import glob
 import sys
@@ -29,9 +29,10 @@ import pickle
 import os
 import sys
 import warnings
+from .hourglass import hg
 
 __all__ = ["DataAugmentation", "HeatmapLearner", "HeatLoss_OldGen_0", "HeatLoss_OldGen_1", "HeatLoss_OldGen_2", "HeatLoss_OldGen_3", "HeatLoss_OldGen_4", "HeatLoss_NextGen_0", "HeatLoss_NextGen_1",
-          "HeatLoss_NextGen_2", "HeatLoss_NextGen_3"]
+          "HeatLoss_NextGen_2", "HeatLoss_NextGen_3", "Loss_weighted"]
 
 class UnNormalize(object):
     def __init__(self, mean, std):
@@ -201,9 +202,9 @@ class ComposeImageTarget(transforms.Compose):
         
 class DataAugmentation:
     "DataAugmentation class with `size(height,width)`"
-    def __init__(self, rotation=10,horizontal_flip_p=0.5,
-                 vertical_flip_p=0.5,warp=0.1,warp_p=0.5, zoom=0.8, 
-                 brightness=0.5, contrast=0.5, GaussianBlur=1):
+    def __init__(self, rotation=20,horizontal_flip_p=0.5,
+                 vertical_flip_p=0.5,warp=0.3,warp_p=0.5, zoom=0.8, 
+                 brightness=0.6, contrast=0.6, GaussianBlur=1):
                  
         
         self.lightning_transforms = transforms.Compose([transforms.ColorJitter(brightness=brightness,contrast=contrast),
@@ -613,12 +614,45 @@ class HeatLoss_NextGen_3(nn.Module):
         
         return (loss_features+loss_all_features+loss_backgrond)/3    
     
+
+class AWing(nn.Module):
+
+    def __init__(self, alpha=2.1, omega=14, epsilon=1, theta=0.5):
+        super().__init__()
+        self.alpha   = float(alpha)
+        self.omega   = float(omega)
+        self.epsilon = float(epsilon)
+        self.theta   = float(theta)
+
+    def forward(self, y_pred , y):
+        lossMat = torch.zeros_like(y_pred)
+        A = self.omega * (1/(1+(self.theta/self.epsilon)**(self.alpha-y)))*(self.alpha-y)*((self.theta/self.epsilon)**(self.alpha-y-1))/self.epsilon
+        C = self.theta*A - self.omega*torch.log(1+(self.theta/self.epsilon)**(self.alpha-y))
+        case1_ind = torch.abs(y-y_pred) < self.theta
+        case2_ind = torch.abs(y-y_pred) >= self.theta
+        lossMat[case1_ind] = self.omega*torch.log(1+torch.abs((y[case1_ind]-y_pred[case1_ind])/self.epsilon)**(self.alpha-y[case1_ind]))
+        lossMat[case2_ind] = A[case2_ind]*torch.abs(y[case2_ind]-y_pred[case2_ind]) - C[case2_ind]
+        return lossMat
+
+class Loss_weighted(nn.Module):
+    def __init__(self, W=10, alpha=2.1, omega=14, epsilon=1, theta=0.5):
+        super().__init__()
+        self.W = float(W)
+        self.Awing = AWing(alpha, omega, epsilon, theta)
+
+    def forward(self, y_pred , y, M, hull):
+        #pdb.set_trace()
+        M = M.float()
+        Loss = self.Awing(y_pred,y)        
+        weighted = Loss * (self.W * M + 1.)
+        return weighted.mean()
+    
 class HeatmapLearner:
     def __init__(self, features, root_path, images_path, hull_path, size=(512,512), bs=-1, items_count=-1, gpu_id=0, 
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
                  unet_init_features=16, valid_images_store="valid_images.npy", image_convert_mode="L", metric_counter=1, 
                  sample_img=None, true_positive_threshold=0.02, ntype="unet", lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False,
-                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, num_load_workers=None):
+                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, num_load_workers=None, dropout=True, dropout_rate=0.15, save_counter=10):
         
         r"""Class for train an Unet-style Neural Network, for heatmap based image recognition
 
@@ -649,12 +683,14 @@ class HeatmapLearner:
                             
         self.features = features
         self.__size = size
+        self.save_counter = save_counter
         self.__num_load_workers = num_load_workers
         self.__root_path = Path(root_path)
         self.__images_path = Path(images_path)
         self.__hull_path = self.__root_path/Path(hull_path)
         self.__sample_results_path = Path(sample_results_path)  
         (self.__root_path/self.__sample_results_path).mkdir(parents=True, exist_ok=True)
+        self.stacked_net = True if ntype=="stacked_hourglass" else False
         
         self.__gpu_id = gpu_id
         self.__file_prefix = file_prefix
@@ -686,11 +722,11 @@ class HeatmapLearner:
                               features=features, bs=bs, data_aug=data_aug,image_convert_mode=image_convert_mode, 
                               heatmap_paths=heatmap_paths, true_positive_threshold=true_positive_threshold, metric_counter=metric_counter,
                               lr=lr, clahe=clahe, norm_stats=norm_stats, unet_init_features=unet_init_features, ntype=ntype, disable_metrics=disable_metrics, loss_func=loss_func,
-                              weight_decay = weight_decay)
+                              weight_decay = weight_decay, dropout=dropout, dropout_rate=dropout_rate)
         
     def __create_learner(self, file_filters_include, file_filters_exclude, valid_images_store, items_count, features, bs, data_aug, 
                          image_convert_mode, heatmap_paths, true_positive_threshold, metric_counter, lr, clahe, norm_stats, 
-                         unet_init_features, ntype, disable_metrics, loss_func, weight_decay):
+                         unet_init_features, ntype, disable_metrics, loss_func, weight_decay, dropout, dropout_rate):
                                 
         training_data, valid_data = self.__load_data(features=features,file_filters_include=file_filters_include,
                                                      file_filters_exclude = file_filters_exclude, valid_images_store=valid_images_store, 
@@ -727,7 +763,7 @@ class HeatmapLearner:
             sample_img = (img,masks)
 
         metric = None if disable_metrics else heatmap_metric(features = features, true_positive_threshold = true_positive_threshold, metric_counter = metric_counter)
-        net = self.__get_net(ntype, unet_init_features).to(torch.device("cuda:"+str(self.__gpu_id)))
+        net = self.__get_net(ntype, unet_init_features, dropout, dropout_rate).to(torch.device("cuda:"+str(self.__gpu_id)))
         opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)        
         loss_func = HeatLoss_NextGen_1() if loss_func is None else loss_func       
         loss_func = loss_func.to(torch.device("cuda:"+str(self.__gpu_id)))                
@@ -743,9 +779,10 @@ class HeatmapLearner:
         
         self.learner = Learner(model=net,loss_func=loss_func, train_dl=train_dl, valid_dl=valid_dl,
                                optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id,
-                               predict_smaple_func=self.predict_sample)                         
+                               predict_smaple_func=self.predict_sample, save_func=self.save_func, 
+                               stacked_net= self.stacked_net)                         
            
-    def __get_net(self, ntype, unet_init_features):
+    def __get_net(self, ntype, unet_init_features, dropout, dropout_rate):
         if ntype == "res_unet++":
              net = UNet(in_channels = self.__unet_in_channels, out_channels = self.__unet_out_channls,
                         init_features = unet_init_features, resblock=True, squeeze_excite=True, 
@@ -780,6 +817,11 @@ class HeatmapLearner:
                                aspp=False, attention=False, bn_relu_at_first=True, bn_relu_at_end=False,
                                block_sizes_down = res34_downsample, downsample_method=downsample_stride,
                                blocksize_bottleneck = 2, block_sizes_up=[2,2,2,2])            
+        elif ntype == "sp_unet":
+                    net = SE_Res_UNet(n_channels=self.__unet_in_channels, n_classes= self.__unet_out_channls,
+                                     init_features=unet_init_features, dropout=dropout, rate=dropout_rate)
+        elif ntype == "stacked_hourglass":   
+                    net  = hg(num_stacks=4,num_blocks=2,num_classes=self.__unet_out_channls, input_features=self.__unet_in_channels)
         else:
             raise("Net type ´"+ ntype+"´ is not implemented!")     
             
@@ -928,9 +970,9 @@ class HeatmapLearner:
         
     def load_from_file(self,filename=None):
         
-        filename = "model" if filename is None else filename 
+        filename = (self.__file_prefix+"model") if filename is None else filename 
         
-        checkpoint = torch.load(self.__root_path/"models"/(self.__file_prefix+filename+".pth"))
+        checkpoint = torch.load(self.__root_path/"models"/(filename+".pth"))
         self.learner.model.load_state_dict(checkpoint['model'])
         self.learner.optimizer.load_state_dict(checkpoint['optimizer'])                                
         self.__epochs = checkpoint["epochs"]
@@ -938,6 +980,11 @@ class HeatmapLearner:
         self.__valid_losses = checkpoint["valid_losses"]
         self.__metrics = checkpoint["metrics"]
         
+    
+    def save_func(self,epoch):
+        if (epoch%self.save_counter)==0:
+            self.save_to_file("model_"+str(epoch))
+
     
     def save_to_file(self,filename=None):
         (self.__root_path/"models").mkdir(parents=True, exist_ok=True)
@@ -1048,7 +1095,10 @@ class HeatmapLearner:
             show_label_func(ax, label, name)                
                 
     def predict(self,inp, eval_mode=True):        
-        return self.learner.predict(inp[None].to(torch.device("cuda:"+str(self.__gpu_id))), eval_mode=eval_mode).detach().cpu()
+        out = self.learner.predict(inp[None].to(torch.device("cuda:"+str(self.__gpu_id))), eval_mode=eval_mode)
+        if self.stacked_net:
+            out = out[-1]    
+        return out.detach().cpu()
                         
     def predict_sample(self, epoch):                  
         name, image, label, mask, hull  = self.sample_dataset[0]
