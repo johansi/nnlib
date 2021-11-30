@@ -21,11 +21,12 @@ class LABELS_TO_HEATMAPS_COMVERTER:
     def __init__(self, root_path, img_path, json_path, features, target_size=512, image_ext="png", 
                  scales=[0.0],crop_margin=0, file_name_function=None, final_images_path="final_images", 
                  painted_images_path="painted_images", convex_hull_features=[],hull_path="hull",
-                 replacements=None, process_output_image=None):
+                 replacements=None, process_output_image=None, mask_dilation=1):
         self.__root_path=root_path
         self.__convex_hull_features = convex_hull_features
         self.__img_path=img_path
         self.__hull_path = hull_path
+        self.mask_dilation = mask_dilation
         self.__json_path=json_path
         self.__features=features            
         self.__final_images_path=final_images_path
@@ -468,7 +469,7 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                     if mask.max() == False:
                         interpolated = np.zeros((mask.shape[0],mask.shape[1]), dtype=np.uint8)
                     else:
-                        dilated = cv2.dilate(mask.astype(np.uint8),dilate_kernel,iterations = 2)                        
+                        dilated = cv2.dilate(mask.astype(np.uint8),dilate_kernel,iterations = self.mask_dilation)                        
                         interpolated = np.round(np.interp(dilated, (dilated.min(), dilated.max()), (0, 255))).astype(np.uint8)
                         
                     self.write_image(interpolated,self.__root_path/asset_key, Path(sized_image_file).stem + "_mask.png", is_gray=True)                                        
