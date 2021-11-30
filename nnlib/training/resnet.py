@@ -3,9 +3,22 @@ import torchvision
 import torch.nn as nn
 from typing import Type, Any, Callable, Union, List, Optional
 from torch import Tensor
+from torch.hub import load_state_dict_from_url
 import pdb
 
 __all__ = ['resnet18', 'resnet34']
+
+model_urls = {
+    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
+    'resnext50_32x4d': 'https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth',
+    'resnext101_32x8d': 'https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth',
+    'wide_resnet50_2': 'https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth',
+    'wide_resnet101_2': 'https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth',
+}
 
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
     """3x3 convolution with padding"""
@@ -17,8 +30,10 @@ def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
+Block_expansion = 1
+
 class BasicBlock(nn.Module):
-    expansion: int = 1
+    
 
     def __init__(self, inplanes: int, planes: int, stride: int = 1, downsample: Optional[nn.Module] = None,
                  groups: int = 1, base_width: int = 64, dilation: int = 1, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
@@ -91,7 +106,7 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, init_features*8, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(init_features*8 * block.expansion, num_classes)
+        self.fc = nn.Linear(init_features*8 * Block_expansion, num_classes)        
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -115,16 +130,16 @@ class ResNet(nn.Module):
         if dilate:
             self.dilation *= stride
             stride = 1
-        if stride != 1 or self.inplanes != planes * block.expansion:
+        if stride != 1 or self.inplanes != planes * Block_expansion:
             downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
-                norm_layer(planes * block.expansion),
+                conv1x1(self.inplanes, planes * Block_expansion, stride),
+                norm_layer(planes * Block_expansion),
             )
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
                             self.base_width, previous_dilation, norm_layer))
-        self.inplanes = planes * block.expansion
+        self.inplanes = planes * Block_expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
@@ -146,15 +161,42 @@ class ResNet(nn.Module):
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        x = self.fc(x)
+        x = self.fc(x)        
 
         return x
 
     def forward(self, x: Tensor) -> Tensor:
         return self._forward_impl(x)
 
-def resnet18(num_classes, init_features= 64, **kwargs: Any) -> ResNet:
-    return ResNet([2, 2, 2, 2], init_features=init_features, num_classes=num_classes, **kwargs)
+def resnet18(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True, **kwargs: Any) -> ResNet:
+    
+    model = ResNet([2, 2, 2, 2], init_features=init_features, **kwargs)
+    if pretrained and init_features==64:
+        state_dict = load_state_dict_from_url(model_urls["resnet18"],progress=progress)
+        model.load_state_dict(state_dict)
+    model.fc = nn.Linear(init_features*8 * Block_expansion, num_classes)
+    
+    if freeze_net:
+        for param in model.parameters():
+            param.requires_grad = False
+        model.fc.weight.requires_grad = True
+        model.fc.bias.requires_grad = True
 
-def resnet34(num_classes, init_features= 64, **kwargs: Any) -> ResNet:
-    return ResNet([3, 4, 6, 3], init_features=init_features, num_classes=num_classes, **kwargs)
+    return model
+
+def resnet34(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True, **kwargs: Any) -> ResNet:    
+    model = ResNet([3, 4, 6, 3], init_features=init_features, **kwargs)
+    
+    if pretrained and init_features==64:
+        state_dict = load_state_dict_from_url(model_urls["resnet34"],progress=progress)
+        model.load_state_dict(state_dict)
+    model.fc = nn.Linear(init_features*8 * Block_expansion, num_classes)
+    
+    if freeze_net:
+        for param in model.parameters():
+            param.requires_grad = False
+        model.fc.weight.requires_grad = True
+        model.fc.bias.requires_grad = True
+
+    return model
+    
