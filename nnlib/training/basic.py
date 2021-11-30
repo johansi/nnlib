@@ -33,9 +33,11 @@ class LearnerCallback():
 
 class Learner:
     
-    def __init__(self, model, loss_func, train_dl, valid_dl, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None, masks_and_hulls=True):        
+    def __init__(self, model, loss_func, train_dl, valid_dl, optimizer, learner_callback=None, gpu_id=0, predict_smaple_func=None, masks_and_hulls=True, save_func=None, stacked_net=False, early_stopping_metric=None):        
         self.device = torch.device("cuda:"+str(gpu_id))
         self.predict_smaple_func = predict_smaple_func if predict_smaple_func is not None else lambda epoch : None        
+        self.save_func = save_func if save_func is not None else lambda epoch : None 
+        self.early_stopping_metric = early_stopping_metric
         self.model = model
         self.train_dl = train_dl
         self.valid_dl = valid_dl        
@@ -47,6 +49,7 @@ class Learner:
         self.train_losses = None
         self.valid_losses = None
         self.masks_and_hulls = masks_and_hulls
+        self.stacked_net = stacked_net
                             
     def set_loss_func(self, loss_func):
         self.loss_func = loss_func
@@ -56,12 +59,19 @@ class Learner:
         
         self.learner_callback.on_batch_begin(x_data, y_data, train=is_train)
         self.optimizer.zero_grad()        
+        
         out = self.model(x_data)
         
         if self.masks_and_hulls:
-            loss = self.loss_func(out, y_data, masks, hulls)
+            if self.stacked_net:
+                loss = sum(self.loss_func(o, y_data, masks, hulls) for o in out)
+            else:
+                loss = self.loss_func(out, y_data, masks, hulls)
         else:
-            loss = self.loss_func(out, y_data)
+            if self.stacked_net:
+                loss = sum(self.loss_func(o, out[1].shape) for o in out)
+            else:
+                loss = self.loss_func(out, y_data)                    
             
         if is_train:
             loss.backward()
@@ -69,7 +79,11 @@ class Learner:
             if scheduler is not None:
                 scheduler.step()
                     
-        self.learner_callback.on_batch_end(out.detach().cpu(), y_data.detach().cpu(), train=is_train)
+        if self.stacked_net:
+            self.learner_callback.on_batch_end(out[-1].detach().cpu(), y_data.detach().cpu(), train=is_train)
+        else:
+            self.learner_callback.on_batch_end(out.detach().cpu(), y_data.detach().cpu(), train=is_train)
+            
         return float(loss.detach().cpu())
     
     def validate(self,parrent_bar):
@@ -126,7 +140,10 @@ class Learner:
         pbar = master_bar(range(epochs))
         pbar.write(["Epoch","train_loss","valid_loss"] + self.metric_names + ["time"], table=True)
         self.learner_callback.on_train_begin()
+        Stop = False
         for epoch in pbar:            
+            if Stop:
+                break
             t1 = time()
             self.model.train()
             self.learner_callback.on_epoch_begin()
@@ -152,6 +169,7 @@ class Learner:
             self.train_losses.append(train_loss)
             self.valid_losses.append(valid_loss)
             self.predict_smaple_func(epoch)
+            self.save_func(epoch)
             met = self.learner_callback.on_epoch_end()
             
             t2 = time()            
@@ -161,11 +179,17 @@ class Learner:
                 for name,value in zip(self.metric_names, met):
                     metrics_table.append(f'{round(value,4):.4f}')                    
                     
-            metrics_table.append(strftime('%M:%S', gmtime(round(t2-t1))))
-                                                                        
+            metrics_table.append(strftime('%M:%S', gmtime(round(t2-t1))))            
             graphs = [[np.arange(len(self.train_losses)),np.array(self.train_losses)], [np.arange(len(self.valid_losses)),np.array(self.valid_losses)]]
             pbar.update_graph(graphs, [0,epochs], [0,np.array([self.train_losses,self.valid_losses]).max()])
             pbar.write([f'{epoch:04d}',f'{round(train_loss,4):.4f}',f'{round(valid_loss,4):.4f}'] + metrics_table, table=True)
+            
+            if self.early_stopping_metric is not None:
+                idx = self.metric_names.index(self.early_stopping_metric[0])
+                if float(metrics_table[idx])>self.early_stopping_metric[1]:
+                    Stop=True
+                    
+                
             
         self.learner_callback.on_train_end()
         
