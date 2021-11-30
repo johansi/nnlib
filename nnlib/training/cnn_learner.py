@@ -49,11 +49,19 @@ class UnNormalize_CNN(object):
 
 class CustomHeatmapDataset_CNN(Dataset):
     "CustomImageDataset with `image_files`,`y_func`, `convert_mode` and `size(height, width)`"
-    def __init__(self, data, size=(512,512), grayscale=False, normalize_mean=None, normalize_std=None, data_aug=None, 
+    def __init__(self, data, size=(512,512), classification=True, grayscale=False, normalize_mean=None, normalize_std=None, data_aug=None, 
                  is_valid=False, do_normalize=True, clahe=True):
         
+        
         self.data = data        
-        self.size = size
+        self.classification = classification
+        self.size = size        
+        if self.classification:
+            self.unique_labels = {}
+            for idx,label in enumerate(np.unique(np.array(data)[:,1])):
+                self.unique_labels[label] = idx 
+        
+        
         
         if normalize_mean is None:
             if grayscale:
@@ -81,7 +89,10 @@ class CustomHeatmapDataset_CNN(Dataset):
         return len(self.data)
 
     def load_labels(self,idx):
-        return self.data[idx][1]
+        data = self.data[idx][1]
+        if self.classification:
+            data = self.unique_labels[data]        
+        return data
     
     def apply_clahe(self,img):
         if self.clahe == None:
@@ -90,6 +101,9 @@ class CustomHeatmapDataset_CNN(Dataset):
         img = self.clahe.apply(img)
         return Image.fromarray(img)                
     
+    def classes(self):
+        return self.unique_labels
+        
     def __getitem__(self, idx):          
         
         image = load_image(self.data[idx][0], size=self.size, convert_mode=self.convert_mode, to_numpy=False)        
@@ -216,7 +230,8 @@ class CNNLearner:
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
                  init_features=16, valid_images_store="valid_images.npy", image_convert_mode="L", metric_counter=1, 
                  lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False, metric=None,
-                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, ntype="resnet18", show_label_func=None):
+                 disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, ntype="resnet18", pretrained=True,
+                 freeze_net=True, show_label_func=None, early_stopping_metric=None):
         
         r"""Class for train an CNN-style Neural Network
 
@@ -233,7 +248,7 @@ class CNNLearner:
         """        
         
         # check assertions
-        assert power_of_2(size), "size must be a power of 2, to work with this class"
+        #assert power_of_2(size), "size must be a power of 2, to work with this class"
         
         #static variables (they are fix)                
         self.__size = size
@@ -245,6 +260,8 @@ class CNNLearner:
         self.__show_label_func = show_label_func if show_label_func is not None else lambda a,b,c: None        
         self.__gpu_id = gpu_id
         self.__file_prefix = file_prefix
+        self.pretrained =pretrained
+        self.freeze_net = freeze_net
         data_aug = DataAugmentation_CNN() if data_aug is None else data_aug
         
         if norm_stats is None:
@@ -265,11 +282,11 @@ class CNNLearner:
                               valid_images_store=valid_images_store, items_count=items_count, bs=bs, metric=metric,
                               data_aug=data_aug,image_convert_mode=image_convert_mode, metric_counter=metric_counter,
                               lr=lr, clahe=clahe, norm_stats=norm_stats, init_features=init_features, disable_metrics=disable_metrics, loss_func=loss_func,
-                              weight_decay = weight_decay, ntype=ntype, num_classes=num_classes)
+                              weight_decay = weight_decay, ntype=ntype, num_classes=num_classes, early_stopping_metric=early_stopping_metric)
         
     def __create_learner(self, get_y_data, file_filters_include, file_filters_exclude, valid_images_store, items_count, bs, data_aug, 
                          image_convert_mode, metric_counter, lr, clahe, norm_stats, metric,
-                         init_features, disable_metrics, loss_func, weight_decay, ntype, num_classes):
+                         init_features, disable_metrics, loss_func, weight_decay, ntype, num_classes, early_stopping_metric):
                                 
         training_data, valid_data = self.__load_data(get_y_data=get_y_data,file_filters_include=file_filters_include,
                                                      file_filters_exclude = file_filters_exclude, valid_images_store=valid_images_store, 
@@ -291,6 +308,7 @@ class CNNLearner:
         
         net = self.__get_net(ntype, init_features, num_classes).to(torch.device("cuda:"+str(self.__gpu_id)))
         
+        #opt = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=weight_decay)
         opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
         
         loss_func = torch.nn.CrossEntropyLoss() if loss_func is None else loss_func               
@@ -308,15 +326,17 @@ class CNNLearner:
         valid_dl = DataLoader(self.valid_dataset, batch_size=bs, shuffle=True, num_workers=num_workers(), pin_memory=True)                                                       
         
         self.learner = Learner(model=net,loss_func=loss_func, train_dl=train_dl, valid_dl=valid_dl,
-                               optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id, masks_and_hulls=False)                 
+                               optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id, masks_and_hulls=False,
+                               early_stopping_metric = early_stopping_metric)                 
            
     def __get_net(self, ntype, init_features, num_classes):
         if ntype == "resnet18":
-             net = resnet18(init_features=init_features,num_classes=num_classes)
+             net = resnet18(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained)
         elif ntype == "resnet34":
-             net = resnet34(init_features=init_features,num_classes=num_classes)                      
+             net = resnet34(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained)                      
         else:
             raise("Net type ´"+ ntype+"´ is not implemented!")     
+            
             
         return net
     
