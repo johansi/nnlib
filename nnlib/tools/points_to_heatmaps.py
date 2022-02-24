@@ -20,8 +20,8 @@ class LABELS_TO_HEATMAPS_COMVERTER:
     
     def __init__(self, root_path, img_path, json_path, features, target_size=512, image_ext="png", 
                  scales=[0.0],crop_margin=0, file_name_function=None, final_images_path="final_images", 
-                 painted_images_path="painted_images", convex_hull_features=[],hull_path="hull",
-                 replacements=None, process_output_image=None, mask_dilation=1):
+                 painted_images_path=None, convex_hull_features=[],hull_path="hull",
+                 replacements=None, process_output_image=None, mask_dilation=1, save_output_img=True):
         self.__root_path=root_path
         self.__convex_hull_features = convex_hull_features
         self.__img_path=img_path
@@ -36,6 +36,7 @@ class LABELS_TO_HEATMAPS_COMVERTER:
         self.__target_size=target_size
         self.__scales = scales
         self.__crop_margin=crop_margin
+        self.__save_output_img = save_output_img
         self.__process_output_image = process_output_image
         self.__file_name_function = file_name_function if file_name_function is not None else lambda label, image_ext: label["Labeled Data"]+ "."+ image_ext 
     def process(self):
@@ -83,10 +84,11 @@ class LABELS_TO_HEATMAPS_COMVERTER:
             
             
     def manage_folders(self):
-        if os.path.exists(self.__root_path/self.__final_images_path):
-            shutil.rmtree(self.__root_path/self.__final_images_path)
-            sleep(0.1)
-        os.mkdir(self.__root_path/self.__final_images_path)
+        if self.__save_output_img:
+            if os.path.exists(self.__root_path/self.__final_images_path):
+                shutil.rmtree(self.__root_path/self.__final_images_path)
+                sleep(0.1)
+            os.mkdir(self.__root_path/self.__final_images_path)
 
         if self.__painted_images_path is not None:
             if os.path.exists(self.__root_path/self.__painted_images_path):
@@ -399,17 +401,26 @@ class LABELS_TO_HEATMAPS_COMVERTER:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         return cv2.imwrite(str(path/file), img)
 
-
+    def check_label(self,label_data):        
+        for key in label_data.keys():
+            if len(label_data[key]) == 0:
+                return True
+            if label_data[key].min() < 0:
+                return False
+        return True
+    
     def new_process(self,labels):    
         dilate_kernel = np.ones((5,5),np.uint8)
         count = len(labels)
         pbar = progress_bar(range(len(labels)))
-        for idx in pbar:
+        for idx in pbar:      
             label = labels[idx]
             # get labels
             
-            label_data,label_types, heat_radiuses = get_labels(label, self.__features)
-
+            label_data,label_types, heat_radiuses = get_labels(label, self.__features)            
+            if not self.check_label(label_data):
+                continue                
+            
             # get file name TODO: set file name to extern function
             file = self.__file_name_function(label, self.__image_ext)
 
@@ -424,21 +435,29 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                 continue
             
             #pdb.set_trace()
+            print(filen)
             img = cv2.imread(str(filen))
             
             img = cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
             
             for scale in self.__scales:
-                sized_image_file = file[:file.find("."+self.__image_ext)]+"_sized_"+str(scale)+".png"
+                try:
+                    sized_image_file = file[:file.find("."+self.__image_ext)]+"_sized_"+str(scale)+".png"
 
-                #zoom images
-                zoomed_label_data, img_zoomed = self.zoom_image(label_data,img, scale)
+                    #zoom images
+                    zoomed_label_data, img_zoomed = self.zoom_image(label_data,img, scale)
 
-                # square images        
-                squared_label_data,img_squared = self.square_image(zoomed_label_data, img_zoomed)
+                    # square images        
+                    squared_label_data,img_squared = self.square_image(zoomed_label_data, img_zoomed)
 
-                # size images
-                sized_label_data,img_sized = self.size_image(squared_label_data, img_squared)
+                    # size images
+                    #try:
+                    sized_label_data,img_sized = self.size_image(squared_label_data, img_squared)
+                    #except:
+                        #pdb.set_trace()
+                except:
+                    print("Skip", file)
+                    continue
 
                 # make heatmaps
                 heatmaps = []
@@ -502,11 +521,12 @@ class LABELS_TO_HEATMAPS_COMVERTER:
                     self.write_image(img_sized_paint,self.__root_path/self.__painted_images_path, sized_image_file, is_gray=False)            
 
                 # save final image
-                if self.__process_output_image is not None:
-                    img_sized = self.__process_output_image(img_sized, sized_image_file)
-                    self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=True)
-                else:
-                    self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=False)
+                if self.__save_output_img:
+                    if self.__process_output_image is not None:
+                        img_sized = self.__process_output_image(img_sized, sized_image_file)
+                        self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=True)
+                    else:
+                        self.write_image(img_sized, self.__root_path/self.__final_images_path, sized_image_file, is_gray=False)
                                     
 
                 pbar.comment = sized_image_file
