@@ -64,27 +64,45 @@ def predict_heatmap_image(runtime, image, size, heatmap_types, enhance=False):#d
     return image, prediction, img_points, times
 
 class PYTORCH_CONTEXT:
-    def __init__(self, model, state_dict_file, norm_stats_mean, norm_stats_std, device="cpu"):
+    def __init__(self, model, state_dict_file, norm_stats_mean=None, norm_stats_std=None, batch_norm=False, device="cpu", model_key=None, convert_out_to_np=False):
         self.device = device
         self.model = model.to(self.device)
-        self.model.load_state_dict(torch.load(state_dict_file, map_location=torch.device(self.device))["model"])
+        checkpoint = torch.load(state_dict_file, map_location=torch.device(self.device))
+        checkpoint = checkpoint if model_key is None else checkpoint["model"]
+        self.model.load_state_dict(checkpoint)
         self.model = self.model.eval()
-        self.normalize = transforms.Normalize(norm_stats_mean,norm_stats_std)
-        self.to_tensor = transforms.ToTensor() 
+        self.batch_norm = batch_norm
+        self.convert_out_to_np = convert_out_to_np
+        if batch_norm:
+            self.normalize = transforms.Normalize(norm_stats_mean,norm_stats_std)
+            self.to_tensor = transforms.ToTensor() 
     
-    def inference(self, inp):
-                
-        if type(inp) == np.ndarray:
-            inp = PIL.Image.fromarray(inp)
+    def inference(self, inputs):
+        inputs = [inputs] if type(inputs) != list else inputs
+                        
+        for idx in range(len(inputs)):
+            if (type(inputs[idx]) == np.ndarray) and self.batch_norm:
+                inputs[idx] = PIL.Image.fromarray(inputs[idx])
             
-        net_inp = self.normalize(self.to_tensor(inp))[None].to(self.device)
-        with torch.no_grad():
-            out = self.model(net_inp).cpu()
-        return np.array(out)
+        if self.batch_norm:
+            for idx in range(len(inputs)):
+                inputs[idx] = self.normalize(self.to_tensor(inputs[idx]))[None].to(self.device)
+        else:
+            for idx in range(len(inputs)): 
+                inputs[idx] = inputs[idx].to(self.device)
+
+        with torch.no_grad():           
+            out = self.model(*inputs)
+            if self.convert_out_to_np:
+                return np.array(out.cpu())
+            else:
+                return out
         
 class TENSOR_RT_CONTEXT:
     def __init__(self, onnxfile, input_names, output_names, norm_stats_mean=None, norm_stats_std=None, 
                  fp16=True, max_workspace_size=3<<28, batch_norm=True):        
+        #print("CREATE TENSOR_RT_CONTEXT")    
+        trt.init_libnvinfer_plugins(None, "")    
         self._fp16 = fp16
         self.norm_stats_mean = norm_stats_mean
         self.norm_stats_std = norm_stats_std
@@ -94,12 +112,17 @@ class TENSOR_RT_CONTEXT:
         self.engine_path = onnxfile.parent/(onnxfile.stem+".engine")        
         self.batch_norm = batch_norm        
         if os.path.exists(self.engine_path):
+            #print("ENINGE EXISTS")
             self.load_tensorrt_engine()
         else:
-            self.onnx_to_tensorrt(onnxfile)
+            if trt.__version__[0] == "8":                
+                self.onnx_to_tensorrt_8(onnxfile)
+            else:
+                self.onnx_to_tensorrt_7(onnxfile)
+            
         self.create_execution_context()
 
-    def create_execution_context(self):        
+    def create_execution_context(self):
         # Determine dimensions and create page-locked memory buffers (i.e. won't be swapped to disk) to hold host inputs/outputs.
         self.host_inputs = []
         self.host_outputs = []
@@ -127,64 +150,52 @@ class TENSOR_RT_CONTEXT:
         # create execution context
         self.context = self.engine.create_execution_context()                
 
-    def inference(self, inputs):
-        #t1=time.time()
+    def inference(self, inputs):        
         
         inputs = [inputs] if type(inputs) != list else inputs        
         for idx in range(len(inputs)):
-            #t1=time.time()
+            
             if self.batch_norm:
                 inputs[idx] = batch_and_normalize(inputs[idx], mean=self.norm_stats_mean, std=self.norm_stats_std)
-            #t2=time.time()
-            #print("batch",(t2-t1)*1000)
-    
-            #t1=time.time()
             np.copyto(self.host_inputs[idx], inputs[idx].ravel()) 
-            #t2=time.time()
-            #print("copy_np",(t2-t1)*1000)
-            
-            #t1=time.time()
-            cuda.memcpy_htod_async(self.device_inputs[idx], self.host_inputs[idx], self.stream)
-            #t2=time.time()
-            #print("copy_async",(t2-t1)*1000)
-            
+            cuda.memcpy_htod_async(self.device_inputs[idx], self.host_inputs[idx], self.stream)            
        
-        #t2=time.time()
-        #print("prepare",(t2-t1)*1000)
-
-        #t1=time.time()
         self.context.execute_async(batch_size= 1, bindings=self.bindings, stream_handle=self.stream.handle)
-        #t2=time.time()
-        #print("inf",(t2-t1)*1000)
-        
-        #t1=time.time()
         for idx in range(len(self.host_outputs)):
             cuda.memcpy_dtoh_async(self.host_outputs[idx], self.device_outputs[idx], self.stream)
-        #t2=time.time()
-        #print("get",(t2-t1)*1000)
-
-            
-        #t1=time.time()
         self.stream.synchronize()
-        #t2=time.time()
-        #print("syncro",(t2-t1)*1000)
-        
-        #t1=time.time()
         outs = []
         for idx in range(len(self.output_names)):
             binding_idx = self.engine.get_binding_index(self.output_names[idx])
             outs.append(np.reshape(self.host_outputs[idx],self.engine.get_binding_shape(binding_idx)))
-        #t2=time.time()
-        #print("reshape",(t2-t1)*1000)
-
-            
         return tuple(outs) if len(outs) > 1 else outs
 
     def load_tensorrt_engine(self):
         with open(self.engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
             self.engine = runtime.deserialize_cuda_engine(f.read())
 
-    def onnx_to_tensorrt(self,onnx_file):
+    def onnx_to_tensorrt_8(self,onnx_file):
+
+        builder = trt.Builder(TRT_LOGGER)
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+        parser = trt.OnnxParser(network, TRT_LOGGER)
+        config = builder.create_builder_config()
+        success = parser.parse_from_file(str(onnx_file))
+        for idx in range(parser.num_errors):
+            print(parser.get_error(idx))
+        config = builder.create_builder_config()
+        if self._fp16:
+            config.set_flag(trt.BuilderFlag.FP16)
+        builder.max_batch_size = 1
+        serialized_engine = builder.build_serialized_network(network, config)
+        
+        with open(self.engine_path, "wb") as f:
+            f.write(serialized_engine)
+            
+        with trt.Runtime(TRT_LOGGER) as runtime:
+            self.engine = runtime.deserialize_cuda_engine(serialized_engine)
+    
+    def onnx_to_tensorrt_7(self,onnx_file):        
 
         EXPLICIT_BATCH = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
         builder = trt.Builder(TRT_LOGGER)
@@ -200,4 +211,5 @@ class TENSOR_RT_CONTEXT:
         self.engine = builder.build_cuda_engine(network)
         with open(self.engine_path, "wb") as f:
             f.write(self.engine.serialize())
+
 
