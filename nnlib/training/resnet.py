@@ -75,12 +75,13 @@ class BasicBlock(nn.Module):
 
 class ResNet(nn.Module):
 
-    def __init__(self, layers: List[int], init_features, num_classes: int = 1000, zero_init_residual: bool = False, groups: int = 1, width_per_group: int = 64,
+    def __init__(self, layers: List[int], init_features, num_classes: int = 1000, zero_init_residual: bool = False, groups: int = 1, use_softmax:bool=False, width_per_group: int = 64,
                  replace_stride_with_dilation: Optional[List[bool]] = None, norm_layer: Optional[Callable[..., nn.Module]] = None) -> None:
         super(ResNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
+        self.use_softmax=use_softmax
         block = BasicBlock 
         self.inplanes = init_features
         self.dilation = 1
@@ -106,7 +107,8 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, init_features*8, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(init_features*8 * Block_expansion, num_classes)        
+        self.fc = nn.Linear(init_features*8 * Block_expansion, num_classes)    
+        
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -161,16 +163,18 @@ class ResNet(nn.Module):
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        x = self.fc(x)        
+        x = self.fc(x)
+        if self.use_softmax:
+            x = torch.nn.functional.softmax(x)
 
         return x
 
     def forward(self, x: Tensor) -> Tensor:
         return self._forward_impl(x)
 
-def resnet18(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True, **kwargs: Any) -> ResNet:
+def resnet18(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True, use_softmax=False,  **kwargs: Any) -> ResNet:
     
-    model = ResNet([2, 2, 2, 2], init_features=init_features, **kwargs)
+    model = ResNet([2, 2, 2, 2], init_features=init_features,use_softmax=use_softmax, **kwargs)
     if pretrained and init_features==64:
         state_dict = load_state_dict_from_url(model_urls["resnet18"],progress=progress)
         model.load_state_dict(state_dict)
@@ -184,8 +188,8 @@ def resnet18(num_classes, init_features= 64, progress=True, freeze_net=True, pre
 
     return model
 
-def resnet34(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True, **kwargs: Any) -> ResNet:    
-    model = ResNet([3, 4, 6, 3], init_features=init_features, **kwargs)
+def resnet34(num_classes, init_features= 64, progress=True, freeze_net=True, pretrained=True,use_softmax=False, **kwargs: Any) -> ResNet:    
+    model = ResNet([3, 4, 6, 3], init_features=init_features, use_softmax=use_softmax, **kwargs)
     
     if pretrained and init_features==64:
         state_dict = load_state_dict_from_url(model_urls["resnet34"],progress=progress)

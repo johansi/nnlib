@@ -55,7 +55,8 @@ class CustomHeatmapDataset_CNN(Dataset):
         
         self.data = data        
         self.classification = classification
-        self.size = size        
+        self.size = size   
+        
         if self.classification:
             self.unique_labels = {}
             for idx,label in enumerate(np.unique(np.array(data)[:,1])):
@@ -229,7 +230,7 @@ class CNNLearner:
     def __init__(self, root_path, get_y_data, images_path, num_classes, size=(512,512), bs=-1, items_count=-1, gpu_id=0, 
                  norm_stats=None, data_aug=None, preload=False, sample_results_path="sample_results",
                  init_features=16, valid_images_store="valid_images.npy", image_convert_mode="L", metric_counter=1, 
-                 lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False, metric=None,
+                 lr=1e-03, file_filters_include=None, file_filters_exclude=None, clahe=False, metric=None,use_softmax=False,
                  disable_metrics=False, file_prefix="", loss_func=None, weight_decay=0, ntype="resnet18", pretrained=True,
                  freeze_net=True, show_label_func=None, early_stopping_metric=None):
         
@@ -262,6 +263,7 @@ class CNNLearner:
         self.__file_prefix = file_prefix
         self.pretrained =pretrained
         self.freeze_net = freeze_net
+        self.init_features = init_features
         data_aug = DataAugmentation_CNN() if data_aug is None else data_aug
         
         if norm_stats is None:
@@ -280,12 +282,12 @@ class CNNLearner:
         
         self.__create_learner(get_y_data=get_y_data, file_filters_include=file_filters_include, file_filters_exclude=file_filters_exclude, 
                               valid_images_store=valid_images_store, items_count=items_count, bs=bs, metric=metric,
-                              data_aug=data_aug,image_convert_mode=image_convert_mode, metric_counter=metric_counter,
+                              data_aug=data_aug,image_convert_mode=image_convert_mode, metric_counter=metric_counter,use_softmax=use_softmax,
                               lr=lr, clahe=clahe, norm_stats=norm_stats, init_features=init_features, disable_metrics=disable_metrics, loss_func=loss_func,
                               weight_decay = weight_decay, ntype=ntype, num_classes=num_classes, early_stopping_metric=early_stopping_metric)
         
     def __create_learner(self, get_y_data, file_filters_include, file_filters_exclude, valid_images_store, items_count, bs, data_aug, 
-                         image_convert_mode, metric_counter, lr, clahe, norm_stats, metric,
+                         image_convert_mode, metric_counter, lr, clahe, norm_stats, metric,use_softmax,
                          init_features, disable_metrics, loss_func, weight_decay, ntype, num_classes, early_stopping_metric):
                                 
         training_data, valid_data = self.__load_data(get_y_data=get_y_data,file_filters_include=file_filters_include,
@@ -306,7 +308,7 @@ class CNNLearner:
         #TODO Implement Metric
         metric = None if disable_metrics else metric()
         
-        net = self.__get_net(ntype, init_features, num_classes).to(torch.device("cuda:"+str(self.__gpu_id)))
+        net = self.__get_net(ntype, init_features, num_classes, use_softmax).to(torch.device("cuda:"+str(self.__gpu_id)))
         
         #opt = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()), lr=lr, weight_decay=weight_decay)
         opt = torch.optim.Adam(net.parameters(), lr=lr, weight_decay=weight_decay)
@@ -329,11 +331,11 @@ class CNNLearner:
                                optimizer=opt, learner_callback= metric,gpu_id= self.__gpu_id, masks_and_hulls=False,
                                early_stopping_metric = early_stopping_metric)                 
            
-    def __get_net(self, ntype, init_features, num_classes):
+    def __get_net(self, ntype, init_features, num_classes, use_softmax):
         if ntype == "resnet18":
-             net = resnet18(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained)
+             net = resnet18(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained, use_softmax=use_softmax)
         elif ntype == "resnet34":
-             net = resnet34(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained)                      
+             net = resnet34(init_features=init_features,num_classes=num_classes, freeze_net=self.freeze_net, pretrained=self.pretrained, use_softmax=use_softmax)                      
         else:
             raise("Net type ´"+ ntype+"´ is not implemented!")     
             
@@ -505,25 +507,29 @@ class CNNLearner:
                     'model': self.learner.model.state_dict(),
                     'optimizer': self.learner.optimizer.state_dict()}, self.__root_path/"models"/(self.__file_prefix+filename+".pth"))        
                 
-    def export_to_onnx(self, filename=None, batch_size=1):
+    def export_to_onnx(self, filename=None, out_folder=None, batch_size=1):
         
-        input_names = [ "actual_input_1" ] + [ "learned_%d" % i for i in range(16) ]
-        output_names = [ "output1" ]
-        pdb.set_trace()
-        onnx_export = (self.__root_path/"onnx_export")
+        input_names = ["input"]
+        output_names = ["output"]  
+        if out_folder is None:
+            onnx_export = (self.__root_path/"onnx_export")
+        else:
+            onnx_export = (self.__root_path/out_folder)
+            
         onnx_export.mkdir(parents=True, exist_ok=True)
         
-        batch = torch.zeros((batch_size,self.__unet_in_channels,self.__size[0],self.__size[1]), 
+        batch = torch.zeros((batch_size,3,self.__size[0],self.__size[1]), 
                            requires_grad=True, device="cuda:"+str(self.__gpu_id))
+                
         
         for i in range(batch_size):
-            batch[i] = self.valid_dataset[i][0]
+            batch[i] = self.valid_dataset[i][1]
                     
         filename = "export" if filename is None else filename 
                 
         torch_out = self.learner.model(batch)
-        torch.onnx.export(self.learner.model, batch,onnx_export/(self.__file_prefix+filename+".onnx"), 
-                          verbose=True, input_names=input_names, output_names=output_names)
+        torch.onnx.export(self.learner.model, batch,onnx_export/(filename+".onnx"), 
+                          verbose=False, input_names=input_names, output_names=output_names)
         
         def test_onnx():            
             import onnxruntime
@@ -542,7 +548,7 @@ class CNNLearner:
 
             print("Exported model has been tested with ONNXRuntime, and the result looks good!")        
         
-        test_onnx()
+        #test_onnx()
                 
     def set_lr(self,lr):
         raise("TODO Implement")
